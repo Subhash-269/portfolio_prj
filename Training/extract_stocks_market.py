@@ -20,6 +20,9 @@ tickers = [
     "SPY", "QQQ", "GLD", "TLT"
 ]
 
+survivors_df = pd.read_csv("sp500_companies.csv")
+tickers = survivors_df["Symbol"].tolist()
+
 start = datetime(2016, 1, 1)
 end = datetime.now()
 
