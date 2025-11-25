@@ -1,15 +1,13 @@
-# portfolio_prj
-
-# AI-Powered Portfolio Optimization (portfolio_prj)
+# AI-Powered Portfolio Optimization
 
 ![Python](https://img.shields.io/badge/Python-3.10%2B-blue) ![Django](https://img.shields.io/badge/Django-5.0-green) ![PyTorch](https://img.shields.io/badge/PyTorch-2.0-orange) ![License](https://img.shields.io/badge/license-MIT-lightgrey)
 
-## 📖 Context
+## Context
 An investment portfolio is an accumulation of different investable assets owned by an individual or institution. Creating a personalized investment portfolio requires balancing goals, risk tolerance, and time horizons (Campbell & Safane, 2024).
 
 **Portfolio Optimization** is the mathematical process of selecting the best combination of assets to achieve the highest possible return for a given level of risk. Traditionally, this is based on **Modern Portfolio Theory (MPT)**, developed by Nobel laureate Harry Markowitz (Victoria, 2024).
 
-## 🚩 Problem Statement
+## Problem Statement
 **Why isn't Traditional MPT enough?**
 While MPT is foundational, it relies on assumptions that often fail in real-world markets:
 * **Linear Assumptions:** It assumes linear correlations between assets, whereas markets are chaotic and non-linear.
@@ -22,13 +20,13 @@ This project moves beyond static formulas by utilizing **Deep Learning (Neural N
 * **Dynamic Adaptation:** The model adjusts weights based on sliding windows of data, reacting to recent trends rather than long-term historical averages.
 * **Direct Optimization:** Instead of forecasting prices (which is error-prone), our model optimizes the *allocation weights* directly to maximize the Sharpe Ratio.
 
-## 💡 Solution
+## Solution
 We have built a **Django-based API** that utilizes a PyTorch Neural Network to generate optimal portfolio allocations.
 
 * **Algorithm:** Convolutional Neural Network (CNN) specifically tuned for time-series financial data.
 * **Objective Function:** A custom loss function that maximizes the **Sharpe Ratio** (Risk-Adjusted Return) while maintaining portfolio diversity via Entropy regularization.
 * **Delivery:** A REST API (documented with Swagger) that accepts a list of tickers and returns the optimal percentage allocation.
-
+<!-- 
 ### Expected Outcome
 * **Input:** A list of stock tickers (e.g., `['AAPL', 'MSFT', 'GOOG']`).
 * **Output:** Precise allocation percentages for the next trading period.
@@ -62,7 +60,7 @@ This project draws inspiration from several key open-source financial AI project
     * *Concept:* RL agents + environment for portfolio optimization.
     * *Relevance:* Provides strong baselines for simulation environments.
 
-## 🚀 Installation & Usage
+## 🚀 Installation & Usage -->
 
 ### Prerequisites
 * Python 3.8+
