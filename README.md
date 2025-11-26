@@ -1,6 +1,6 @@
 # AI-Powered Portfolio Optimization
 
-![Python](https://img.shields.io/badge/Python-3.10%2B-blue) ![Django](https://img.shields.io/badge/Django-5.0-green) ![PyTorch](https://img.shields.io/badge/PyTorch-2.0-orange) ![License](https://img.shields.io/badge/license-MIT-lightgrey)
+![Python](https://img.shields.io/badge/Python-3.10%2B-blue) ![Django](https://img.shields.io/badge/Django-5.0-green) ![PyTorch](https://img.shields.io/badge/PyTorch-2.0-orange)
 
 ## Context
 An investment portfolio is an accumulation of different investable assets owned by an individual or institution. Creating a personalized investment portfolio requires balancing goals, risk tolerance, and time horizons (Campbell & Safane, 2024).
