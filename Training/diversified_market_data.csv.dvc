@@ -1,0 +1,5 @@
+outs:
+- md5: a4ecb5036e96fe0cca03210e314cbfdf
+  size: 72353300
+  hash: md5
+  path: diversified_market_data.csv
