@@ -40,7 +40,7 @@ An AI investment engine that uses deep learning to maximize risk-adjusted return
     }
     ```
 
-## 🔬 Methodology
+## Methodology
 The system follows a sliding-window approach to training:
 
 1.  **Data Ingestion:** Load historical OHLC (Open, High, Low, Close) data.
@@ -49,7 +49,7 @@ The system follows a sliding-window approach to training:
 4.  **Training:** The `AllocNet` model processes these windows to output a Softmax probability distribution (weights summing to 1.0).
 5.  **Validation:** The model is evaluated against an Equal-Weight baseline using Cumulative Return and Sharpe Ratio metrics.
 
-## 📚 Existing Approaches & Related Work
+## Existing Approaches & Related Work
 This project draws inspiration from several key open-source financial AI projects:
 
 * **[PGPortfolio](https://github.com/ZhengyaoJiang/PGPortfolio)** (Zhengyao Jiang et al.)
@@ -62,7 +62,7 @@ This project draws inspiration from several key open-source financial AI project
     * *Concept:* RL agents + environment for portfolio optimization.
     * *Relevance:* Provides strong baselines for simulation environments.
 
-## 🚀 Installation & Usage -->
+## Installation & Usage -->
 
 ### Prerequisites
 * Python 3.8+
