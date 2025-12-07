@@ -264,3 +264,152 @@ def train_model(request):
         import traceback
         traceback.print_exc()
         return Response({'error': str(e)}, status=500)
+
+
+# ---------- NEW: Train By Sectors Endpoint ----------
+
+# Minimal sector map to translate sectors → tickers (aligns with Training/training_div.py)
+SECTOR_MAP = {
+    # Technology
+    'AAPL': 'Technology', 'MSFT': 'Technology', 'GOOGL': 'Technology',
+    'NVDA': 'Technology', 'META': 'Technology', 'TSLA': 'Technology',
+    'AMD': 'Technology', 'INTC': 'Technology', 'ORCL': 'Technology',
+    'AVGO': 'Technology', 'CRM': 'Technology', 'ADBE': 'Technology',
+    # Finance
+    'JPM': 'Finance', 'BAC': 'Finance', 'WFC': 'Finance',
+    'GS': 'Finance', 'MS': 'Finance', 'C': 'Finance',
+    'V': 'Finance', 'MA': 'Finance', 'AXP': 'Finance',
+    # Healthcare
+    'JNJ': 'Healthcare', 'UNH': 'Healthcare', 'PFE': 'Healthcare',
+    'ABBV': 'Healthcare', 'TMO': 'Healthcare', 'MRK': 'Healthcare',
+    'LLY': 'Healthcare', 'ABT': 'Healthcare',
+    # Consumer
+    'AMZN': 'Consumer', 'WMT': 'Consumer', 'HD': 'Consumer',
+    'NKE': 'Consumer', 'MCD': 'Consumer', 'SBUX': 'Consumer',
+    'COST': 'Consumer', 'TGT': 'Consumer',
+    # Energy
+    'XOM': 'Energy', 'CVX': 'Energy', 'COP': 'Energy',
+    'SLB': 'Energy', 'EOG': 'Energy',
+    # Industrials
+    'BA': 'Industrials', 'CAT': 'Industrials', 'GE': 'Industrials',
+    'UPS': 'Industrials', 'HON': 'Industrials',
+    # Index/ETFs
+    'SPY': 'Index', 'QQQ': 'Index', 'IWM': 'Index', 'DIA': 'Index',
+}
+
+train_sectors_schema = openapi.Schema(
+    type=openapi.TYPE_OBJECT,
+    properties={
+        'sectors': openapi.Schema(
+            type=openapi.TYPE_ARRAY,
+            items=openapi.Schema(type=openapi.TYPE_STRING),
+            description='Sector names to include (e.g., Technology, Finance)'
+        ),
+        'top_k': openapi.Schema(type=openapi.TYPE_INTEGER, description='Number of top allocations to return', default=10),
+        'window': openapi.Schema(type=openapi.TYPE_INTEGER, description='Lookback window', default=WINDOW),
+        'epochs': openapi.Schema(type=openapi.TYPE_INTEGER, description='Training epochs (small)', default=EPOCHS),
+    },
+    required=['sectors']
+)
+
+@swagger_auto_schema(
+    method='post',
+    request_body=train_sectors_schema,
+    operation_description='Train the allocation model filtered by sectors and return top allocations',
+    responses={200: 'Success', 400: 'Bad Request'}
+)
+@api_view(['POST'])
+def train_by_sectors(request):
+    try:
+        sectors = request.data.get('sectors', [])
+        if not sectors:
+            return Response({'error': 'No sectors provided'}, status=400)
+
+        top_k = int(request.data.get('top_k', 10))
+        window = int(request.data.get('window', WINDOW))
+        epochs = int(request.data.get('epochs', EPOCHS))
+
+        # Load CSV
+        csv_path = "Training/diversified_market_data.csv"
+        if not os.path.exists(csv_path):
+            csv_path = "Training/stocks_market_data.csv"
+        if not os.path.exists(csv_path):
+            return Response({'error': 'Data file not found on server'}, status=500)
+
+        df = pd.read_csv(csv_path)
+        if 'Date' in df.columns:
+            df['Date'] = pd.to_datetime(df['Date'])
+
+        # Map sectors to tickers and intersect with available tickers in CSV
+        available_tickers = set(df['Ticker'].unique().tolist())
+        selected_tickers = [t for t, s in SECTOR_MAP.items() if s in sectors and t in available_tickers]
+        selected_tickers = sorted(set(selected_tickers))
+
+        if len(selected_tickers) < 2:
+            return Response({'error': f'Not enough tickers found for sectors {sectors}. Found: {selected_tickers}'}, status=400)
+
+        # Prepare data
+        try:
+            X_array, Y_array, X_final, TICKERS = prepare_data(df, selected_tickers, window)
+        except ValueError as e:
+            return Response({'error': str(e)}, status=400)
+
+        # Dataset & loader
+        ds = TensorDatasetOnCPU(X_array, Y_array)
+        loader = data.DataLoader(ds, batch_size=BATCH_SIZE, shuffle=True, num_workers=0)
+
+        # Model
+        num_assets = len(TICKERS)
+        model = AllocNetSmall(num_assets=num_assets, window=window).to(DEVICE)
+        opt = optim.Adam(model.parameters(), lr=LR)
+
+        # Quick training loop for API
+        model.train()
+        for ep in range(max(1, epochs)):
+            epoch_loss = 0.0
+            for xb_np, yb_np in loader:
+                # Support both numpy arrays and already-created torch tensors
+                if isinstance(xb_np, torch.Tensor):
+                    xb = xb_np.float().to(DEVICE)
+                    yb = yb_np.float().to(DEVICE)
+                else:
+                    xb = torch.from_numpy(xb_np).float().to(DEVICE)
+                    yb = torch.from_numpy(yb_np).float().to(DEVICE)
+                opt.zero_grad()
+                w = model(xb)
+                loss = LossFunctions.explicit_log_return(w, yb, prev_weights=w.detach())
+                if torch.isnan(loss) or torch.isinf(loss):
+                    continue
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                opt.step()
+                epoch_loss += loss.item()
+
+        # Inference for next-day allocation
+        model.eval()
+        with torch.no_grad():
+            Xf = torch.from_numpy(X_final).float().unsqueeze(0).to(DEVICE)
+            future_weights = model(Xf).cpu().numpy().flatten()
+
+        # Top-K allocations
+        idxs = np.argsort(future_weights)[-top_k:][::-1]
+        portfolio = [
+            {
+                'ticker': TICKERS[i],
+                'allocation': float(future_weights[i] * 100.0),
+                'sector': SECTOR_MAP.get(TICKERS[i], 'Other')
+            }
+            for i in idxs
+        ]
+
+        return Response({
+            'status': 'success',
+            'sectors': sectors,
+            'tickers_used': TICKERS,
+            'portfolio': portfolio
+        })
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return Response({'error': str(e)}, status=500)
