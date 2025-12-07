@@ -60,30 +60,60 @@ function SegmentedControl({ segments, active, onChange }) {
   );
 }
 
-function PortfolioResults({ selectedAssets, selectedSubsectors }) {
-  // Simulate model results
-  const results = [
-    { asset: 'Gold', weight: 0.18 },
-    { asset: 'US Stock Market (S&P 500)', weight: 0.32 },
-    { asset: 'Commodities', weight: 0.12 },
-    { asset: 'US Bonds', weight: 0.38 },
-  ];
+function PortfolioResults({ result }) {
+  const hasApi = result && Array.isArray(result.portfolio);
+  const sectors = hasApi ? result.sectors || [] : [];
+  const tickersUsed = hasApi ? result.tickers_used || [] : [];
+  const portfolio = hasApi
+    ? [...result.portfolio].sort((a, b) => b.allocation - a.allocation)
+    : [
+        { ticker: 'Gold', allocation: 18, sector: 'Commodities' },
+        { ticker: 'S&P 500', allocation: 32, sector: 'Equity' },
+        { ticker: 'Commodities', allocation: 12, sector: 'Commodities' },
+        { ticker: 'US Bonds', allocation: 38, sector: 'Fixed Income' },
+      ];
+
   return (
-    <div className="dashboard-container" style={{ maxWidth: '900px', margin: '0 auto', padding: '2vw', minHeight: '70vh', background: '#f3f4f6' }}>
-      <div className="card" style={{ background: '#fff', borderRadius: '1.5rem', boxShadow: '0 2px 12px rgba(30,41,59,0.08)', padding: '2rem', margin: '0 auto', maxWidth: '700px' }}>
-        <h2 style={{ fontSize: '2.2rem', fontWeight: 700, marginBottom: '1.5rem', color: '#22223b', fontFamily: 'Poppins, Inter, sans-serif' }}>Portfolio Results</h2>
-        <table style={{ width: '100%', borderCollapse: 'collapse', marginTop: '1rem' }}>
+    <div className="dashboard-container" style={{ maxWidth: '1100px', margin: '0 auto', padding: '2vw', minHeight: '70vh', background: '#f3f4f6' }}>
+      <div className="card" style={{ background: '#fff', borderRadius: '1.5rem', boxShadow: '0 2px 12px rgba(30,41,59,0.08)', padding: '2rem' }}>
+        <h2 style={{ fontSize: '2.2rem', fontWeight: 700, marginBottom: '1rem', color: '#22223b', fontFamily: 'Poppins, Inter, sans-serif' }}>Portfolio Results</h2>
+
+        {hasApi && sectors.length > 0 && (
+          <div style={{ marginBottom: '1rem' }}>
+            <div style={{ color: '#6b7280', fontSize: '0.95rem', marginBottom: '0.5rem' }}>Sectors</div>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.5rem' }}>
+              {sectors.map(s => (
+                <span key={s} style={{ background: '#f3f4f6', color: '#22223b', borderRadius: '999px', padding: '0.35rem 0.75rem', fontSize: '0.9rem', fontWeight: 600 }}>{s}</span>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {hasApi && tickersUsed.length > 0 && (
+          <div style={{ marginBottom: '1.25rem' }}>
+            <div style={{ color: '#6b7280', fontSize: '0.95rem', marginBottom: '0.5rem' }}>Tickers Used</div>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.5rem' }}>
+              {tickersUsed.map(t => (
+                <span key={t} style={{ background: '#eef2ff', color: '#3730a3', borderRadius: '0.6rem', padding: '0.35rem 0.6rem', fontSize: '0.9rem', fontWeight: 600 }}>{t}</span>
+              ))}
+            </div>
+          </div>
+        )}
+
+        <table style={{ width: '100%', borderCollapse: 'collapse', marginTop: '0.5rem' }}>
           <thead>
             <tr>
-              <th style={{ textAlign: 'left', padding: '0.75rem 1rem', color: '#22223b', fontWeight: 600 }}>Asset</th>
-              <th style={{ textAlign: 'left', padding: '0.75rem 1rem', color: '#22223b', fontWeight: 600 }}>Weight</th>
+              <th style={{ textAlign: 'left', padding: '0.75rem 1rem', color: '#22223b', fontWeight: 600 }}>Ticker</th>
+              <th style={{ textAlign: 'left', padding: '0.75rem 1rem', color: '#22223b', fontWeight: 600 }}>Sector</th>
+              <th style={{ textAlign: 'right', padding: '0.75rem 1rem', color: '#22223b', fontWeight: 600 }}>Allocation</th>
             </tr>
           </thead>
           <tbody>
-            {results.map(r => (
-              <tr key={r.asset}>
-                <td style={{ padding: '0.75rem 1rem', color: '#22223b' }}>{r.asset}</td>
-                <td style={{ padding: '0.75rem 1rem', color: '#22223b' }}>{(r.weight * 100).toFixed(2)}%</td>
+            {portfolio.map(row => (
+              <tr key={`${row.ticker}-${row.sector}`}>
+                <td style={{ padding: '0.75rem 1rem', color: '#22223b', fontWeight: 600 }}>{row.ticker}</td>
+                <td style={{ padding: '0.75rem 1rem', color: '#22223b' }}>{row.sector}</td>
+                <td style={{ padding: '0.75rem 1rem', color: '#22223b', textAlign: 'right' }}>{`${Number(row.allocation).toFixed(2)}%`}</td>
               </tr>
             ))}
           </tbody>
@@ -399,7 +429,7 @@ function DashboardDemo() {
       {/* ...existing code... */}
       {activeSegment === 3 ? (
         !loading ? (
-          <PortfolioResults selectedAssets={portfolioData?.checked} selectedSubsectors={portfolioData?.subChecked} />
+          <PortfolioResults result={portfolioData?.result} />
         ) : null
       ) : activeSegment === 0 ? (
         <div className="card" style={{ display: 'flex', flexWrap: 'wrap', gap: '2rem', background: '#f3f4f6', borderRadius: '2rem', boxShadow: '0 2px 8px rgba(30,41,59,0.04)', minHeight: '50vh', alignItems: 'stretch' }}>
