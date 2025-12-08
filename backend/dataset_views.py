@@ -190,3 +190,90 @@ def gics_sector_returns(request):
     # Sort by 1Y descending for convenience
     results.sort(key=lambda x: x['y1'], reverse=True)
     return JsonResponse(results, safe=False)
+
+@swagger_auto_schema(
+    method='get',
+    operation_description='Return monthly equal-weight sector index time series from diversified_market_data.csv. Optionally filter by sectors via ?sectors=Tech,Finance',
+    responses={200: openapi.Schema(type=openapi.TYPE_OBJECT)}
+)
+@api_view(['GET'])
+def gics_sector_timeseries(request):
+    import json
+    # Load mapper
+    mapper_path = _load_mapper_path()
+    if not os.path.exists(mapper_path):
+        _ = sp500_gics_sectors(request)
+    try:
+        with open(mapper_path, 'r', encoding='utf-8') as f:
+            mapper = json.load(f)
+    except Exception:
+        return JsonResponse({'error': 'mapper.json not available'}, status=500)
+
+    # Load market data
+    data_paths = [os.path.join('Training', 'diversified_market_data.csv'), 'diversified_market_data.csv']
+    csv_path = next((p for p in data_paths if os.path.exists(p)), None)
+    if csv_path is None:
+        return JsonResponse({'error': 'diversified_market_data.csv not found'}, status=500)
+
+    df = pd.read_csv(csv_path)
+    if 'Date' not in df.columns or 'Ticker' not in df.columns or 'Close' not in df.columns:
+        return JsonResponse({'error': 'CSV must contain Date, Ticker, Close'}, status=500)
+    df['Date'] = pd.to_datetime(df['Date'])
+
+    # Restrict to mapper tickers
+    df = df[df['Ticker'].isin(mapper.keys())]
+    if df.empty:
+        return JsonResponse({'error': 'No overlapping tickers between mapper and data'}, status=500)
+
+    # Build sector -> tickers map
+    from collections import defaultdict
+    sector_to_tickers = defaultdict(list)
+    for sym, val in mapper.items():
+        sector = val.get('sector') if isinstance(val, dict) else val
+        if sector:
+            sector_to_tickers[sector].append(sym)
+
+    # Optional filter
+    query = request.GET.get('sectors')
+    wanted = None
+    if query:
+        wanted = {s.strip().lower() for s in query.split(',') if s.strip()}
+
+    # Optional limit (number of points) or 'all'
+    limit_param = request.GET.get('limit', '60')
+    limit = None
+    if isinstance(limit_param, str) and limit_param.lower() == 'all':
+        limit = None
+    else:
+        try:
+            limit = max(1, int(limit_param))
+        except Exception:
+            limit = 60
+
+    # Pivot close prices
+    pivot = df.pivot(index='Date', columns='Ticker', values='Close').sort_index().ffill().bfill()
+
+    # Monthly resample (end of month)
+    monthly = pivot.resample('M').last()
+
+    # Compute equal-weight sector index normalized to 100 at start
+    series = {}
+    for sector, tickers in sector_to_tickers.items():
+        if not tickers:
+            continue
+        if wanted and sector.lower() not in wanted:
+            continue
+        cols = [t for t in tickers if t in monthly.columns]
+        if len(cols) == 0:
+            continue
+        # Equal-weight portfolio value: average of normalized prices
+        sub = monthly[cols]
+        base = sub.iloc[0]
+        base[base == 0] = 1.0
+        norm = sub.div(base).mean(axis=1) * 100.0
+        # Downsample if limit is set
+        if limit is not None and len(norm) > limit:
+            norm = norm.iloc[-limit:]
+        series[sector] = [{'date': d.strftime('%Y-%m-%d'), 'value': round(float(v), 2)} for d, v in norm.items()]
+
+    return JsonResponse({'series': series}, safe=False)
