@@ -104,6 +104,7 @@ function PortfolioResults({ result }) {
   const sectors = hasApi ? result.sectors || [] : [];
   const tickersUsed = hasApi ? result.tickers_used || [] : [];
   const assetsUsed = hasApi ? result.assets_used || [] : [];
+  const metrics = hasApi ? (result.metrics || null) : null;
   const companiesUsedCount = hasApi ? (Array.isArray(result.tickers_used) ? result.tickers_used.length : 0) : 0;
   const portfolio = hasApi ? [...result.portfolio] : [];
   const [showAll, setShowAll] = React.useState(false);
@@ -214,6 +215,24 @@ function PortfolioResults({ result }) {
                     {assetsUsed.map(a => (
                       <span key={a} style={{ background: '#eef2ff', color: '#1f2937', borderRadius: '999px', padding: '0.25rem 0.6rem', fontSize: '0.85rem', fontWeight: 600 }}>{a}</span>
                     ))}
+                  </div>
+                </div>
+              )}
+              {metrics && (
+                <div style={{ marginTop: '1rem' }}>
+                  <div style={{ color: '#6b7280', fontSize: '0.95rem', marginBottom: '0.5rem' }}>Evaluation</div>
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.5rem', background: '#f9fafb', border: '1px solid #e5e7eb', borderRadius: '0.75rem', padding: '0.6rem' }}>
+                    <div style={{ color: '#374151', fontSize: '0.9rem' }}>Sharpe: <span style={{ fontWeight: 600 }}>{Number(metrics.sharpe).toFixed(2)}</span></div>
+                    <div style={{ color: '#374151', fontSize: '0.9rem' }}>Sortino: <span style={{ fontWeight: 600 }}>{Number(metrics.sortino).toFixed(2)}</span></div>
+                    <div style={{ color: '#374151', fontSize: '0.9rem' }}>Vol (mo): <span style={{ fontWeight: 600 }}>{Number(metrics.vol_monthly).toFixed(3)}</span></div>
+                    <div style={{ color: '#374151', fontSize: '0.9rem' }}>Risk (annual): <span style={{ fontWeight: 600 }}>{(Number(metrics.vol_annual) * 100).toFixed(2)}%</span></div>
+                    <div style={{ color: metrics.short_term_1w >= 0 ? '#16a34a' : '#dc2626', fontSize: '0.9rem' }}>1W: <span style={{ fontWeight: 600 }}>{metrics.short_term_1w == null ? 'n/a' : `${(Number(metrics.short_term_1w) * 100).toFixed(2)}%`}</span></div>
+                    <div style={{ color: metrics.short_term_1m >= 0 ? '#16a34a' : '#dc2626', fontSize: '0.9rem' }}>1M: <span style={{ fontWeight: 600 }}>{metrics.short_term_1m == null ? 'n/a' : `${(Number(metrics.short_term_1m) * 100).toFixed(2)}%`}</span></div>
+                    <div style={{ color: '#374151', fontSize: '0.9rem' }}>MaxDD: <span style={{ fontWeight: 600 }}>{Number(metrics.max_drawdown).toFixed(3)}</span></div>
+                    <div style={{ color: '#374151', fontSize: '0.9rem' }}>CVaR95: <span style={{ fontWeight: 600 }}>{Number(metrics.cvar_95).toFixed(3)}</span></div>
+                    <div style={{ color: '#374151', fontSize: '0.9rem' }}>Rolling Sharpe (12m): <span style={{ fontWeight: 600 }}>{Number(metrics.rolling_sharpe_12m).toFixed(2)}</span></div>
+                    <div style={{ color: '#374151', fontSize: '0.9rem' }}>Rolling MaxDD (12m): <span style={{ fontWeight: 600 }}>{Number(metrics.rolling_mdd_12m).toFixed(3)}</span></div>
+                    <div style={{ color: '#374151', fontSize: '0.9rem' }}>Turnover vs model: <span style={{ fontWeight: 600 }}>{Number(metrics.avg_turnover).toFixed(3)}</span></div>
                   </div>
                 </div>
               )}
@@ -620,6 +639,125 @@ function TemplatesPage() {
   );
 }
 
+function CompositeViewer() {
+  const [data, setData] = React.useState(null);
+  const [error, setError] = React.useState(null);
+  const [showAll, setShowAll] = React.useState(false);
+  const riskRange = React.useMemo(() => {
+    if (!data || !Array.isArray(data.top3) || data.top3.length === 0) return null;
+    const vals = data.top3.map(t => Number(t.metrics?.vol_annual) || 0).filter(v => isFinite(v));
+    if (vals.length === 0) return null;
+    return { min: Math.min(...vals), max: Math.max(...vals) };
+  }, [data]);
+  React.useEffect(() => {
+    let isMounted = true;
+    // composite_top3.json should be placed under front_end/public for the app to serve it
+    fetch('/composite_top3.json')
+      .then(res => res.ok ? res.json() : Promise.reject(new Error('Failed to load composite_top3.json')))
+      .then(json => { if (isMounted) setData(json); })
+      .catch(err => { if (isMounted) setError(err.message); });
+    return () => { isMounted = false; };
+  }, []);
+
+  return (
+    <div className="dashboard-container" style={{ maxWidth: '1200px', margin: '0 auto', padding: '2vw', minHeight: '60vh' }}>
+      <div className="card" style={{ background: '#fff', borderRadius: '1.5rem', boxShadow: '0 2px 12px rgba(30,41,59,0.08)', padding: '2rem' }}>
+        <h2 style={{ fontSize: '1.8rem', fontWeight: 700, marginBottom: '1rem', color: '#22223b' }}>Composite Portfolios</h2>
+        {error && (
+          <div style={{ color: '#ef4444', marginBottom: '1rem' }}>Error: {error}</div>
+        )}
+        {!data && !error && (
+          <div style={{ color: '#6b7280' }}>Loading composite results…</div>
+        )}
+        {data && Array.isArray(data.top3) && (
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '1rem' }}>
+            {data.top3.map((tier) => {
+              const subtitle = tier.tier === 'Conservative'
+                ? 'Capital preservation with commodities tilt; lower drawdowns; 3–5y horizon.'
+                : tier.tier === 'Balanced'
+                  ? 'Balanced risk and return; diversified across sectors and commodities; 5+ year growth.'
+                  : 'Return-seeking, equity momentum tilt; higher volatility; 7+ year horizon.';
+              return (
+              <div key={tier.tier} style={{ background: '#f9fafb', border: '1px solid #e5e7eb', borderRadius: '1rem', padding: '1rem' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
+                  <div style={{ fontSize: '1.1rem', fontWeight: 700, color: '#111827' }}>{tier.tier}</div>
+                  <span style={{
+                    marginLeft: 'auto',
+                    background: tier.tier === 'Aggressive' ? '#fee2e2' : tier.tier === 'Balanced' ? '#e0f2fe' : '#dcfce7',
+                    color: tier.tier === 'Aggressive' ? '#b91c1c' : tier.tier === 'Balanced' ? '#0ea5e9' : '#16a34a',
+                    border: '1px solid #e5e7eb',
+                    borderRadius: 999,
+                    padding: '2px 8px',
+                    fontSize: 11,
+                    fontWeight: 600
+                  }}>{tier.tier === 'Aggressive' ? 'Higher Risk' : tier.tier === 'Balanced' ? 'Moderate Risk' : 'Lower Risk'}</span>
+                </div>
+                <div style={{ color: '#6b7280', fontSize: 12, marginBottom: 8 }}>{subtitle}</div>
+                <div style={{ color: '#6b7280', fontSize: 12, marginBottom: 8 }}>Top holdings by weight</div>
+                <ul style={{ listStyle: 'none', padding: 0, margin: 0 }}>
+                  {(showAll ? Object.entries(tier.weights).sort((a,b) => b[1]-a[1]) : Object.entries(tier.weights).sort((a,b) => b[1]-a[1]).slice(0,10)).map(([asset, w]) => (
+                    <li key={`${tier.tier}-${asset}`} style={{ display: 'flex', gap: 8, padding: '4px 0', color: '#22223b' }}>
+                      <span style={{ fontWeight: 600 }}>{asset}</span>
+                      <span style={{ marginLeft: 'auto' }}>{(w*100).toFixed(2)}%</span>
+                    </li>
+                  ))}
+                </ul>
+                {(() => {
+                  const entries = Object.entries(tier.weights);
+                  const sorted = entries.sort((a,b) => b[1]-a[1]);
+                  const shown = showAll ? sorted : sorted.slice(0,10);
+                  const shownSum = shown.reduce((acc, [,w]) => acc + w, 0);
+                  const remainder = Math.max(0, 1 - shownSum);
+                  return (
+                    <div style={{ display: 'flex', alignItems: 'center', marginTop: 8 }}>
+                      <div style={{ color: '#6b7280', fontSize: 12 }}>Shown total: {(shownSum*100).toFixed(2)}%{remainder > 1e-6 ? ` • Others: ${(remainder*100).toFixed(2)}%` : ''}</div>
+                      <button onClick={() => setShowAll(v => !v)} style={{ marginLeft: 'auto', background: '#fff', border: '1px solid #e5e7eb', borderRadius: 16, padding: '4px 10px', fontSize: 12, color: '#22223b', cursor: 'pointer' }}>{showAll ? 'View less' : 'View all'}</button>
+                    </div>
+                  );
+                })()}
+                {tier.metrics && (
+                  <div style={{ marginTop: 10, fontSize: 12, color: '#374151' }}>
+                    <div>Sharpe: {Number(tier.metrics.sharpe).toFixed(2)}</div>
+                    <div>Sortino: {Number(tier.metrics.sortino).toFixed(2)}</div>
+                    <div>Vol (mo): {Number(tier.metrics.vol_monthly).toFixed(3)}</div>
+                    {(() => {
+                      const r = Number(tier.metrics.vol_annual);
+                      let rColor = '#6b7280';
+                      if (riskRange && isFinite(r)) {
+                        const span = Math.max(1e-9, riskRange.max - riskRange.min);
+                        const z = (r - riskRange.min) / span; // 0..1
+                        if (z < 0.33) rColor = '#16a34a';
+                        else if (z < 0.66) rColor = '#f59e0b';
+                        else rColor = '#dc2626';
+                      }
+                      return <div style={{ color: rColor }}>Risk (annual vol): {(r * 100).toFixed(2)}%</div>;
+                    })()}
+                    {(() => {
+                      const w = tier.metrics.short_term_1w;
+                      const wColor = w == null ? '#6b7280' : (w >= 0 ? '#16a34a' : '#dc2626');
+                      const wText = w == null ? 'n/a' : `${(Number(w) * 100).toFixed(2)}%`;
+                      return <div style={{ color: wColor }}>1W Return: {wText}</div>;
+                    })()}
+                    {(() => {
+                      const m = tier.metrics.short_term_1m;
+                      const mColor = m == null ? '#6b7280' : (m >= 0 ? '#16a34a' : '#dc2626');
+                      const mText = m == null ? 'n/a' : `${(Number(m) * 100).toFixed(2)}%`;
+                      return <div style={{ color: mColor }}>1M Return: {mText}</div>;
+                    })()}
+                    <div>MaxDD: {Number(tier.metrics.max_drawdown).toFixed(3)}</div>
+                    <div>CVaR95: {Number(tier.metrics.cvar_95).toFixed(3)}</div>
+                  </div>
+                )}
+              </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function DashboardDemo() {
 
   const [activeSegment, setActiveSegment] = React.useState(0);
@@ -906,6 +1044,8 @@ function DashboardDemo() {
         !loading ? (
           <PortfolioResults result={portfolioData?.result} />
         ) : null
+      ) : activeSegment === 2 ? (
+        <CompositeViewer />
       ) : activeSegment === 0 ? (
         <div className="card" style={{ display: 'flex', flexWrap: 'wrap', gap: '1.5rem', background: '#f3f4f6', borderRadius: '1.5rem', boxShadow: '0 1px 8px rgba(30,41,59,0.06)', minHeight: '50vh', alignItems: 'stretch' }}>
           <div style={{ flex: '1 1 0', minWidth: '320px', maxWidth: '100%', minHeight: '260px', display: 'flex', alignItems: 'center', justifyContent: 'center', width: '50%', boxSizing: 'border-box' }}>
