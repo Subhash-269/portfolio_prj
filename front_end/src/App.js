@@ -43,7 +43,8 @@ const assetPerformanceData = [
   // { asset: 'Gold', y1: 57.94, y3: 33.02, y5: 18.40 },
   // { asset: 'Intl Developed Markets', y1: 26.26, y3: 15.87, y5: 9.49 },
   // { asset: 'Emerging Markets', y1: 22.81, y3: 14.30, y5: 6.22 },
-  { asset: 'US Stock Market (S&P 500)', y1: 17.53, y3: 24.89, y5: 16.45 },
+  // S&P 500 row values are computed dynamically from sector rows; keep placeholders neutral
+  { asset: 'US Stock Market (S&P 500)', y1: 0, y3: 0, y5: 0 },
   // { asset: 'Commodities', y1: 15.84, y3: 4.26, y5: 11.62 },
   // { asset: 'Intermediate Treasuries', y1: 6.44, y3: 4.17, y5: -0.18 },
   // { asset: 'Total Bond Market', y1: 5.70, y3: 4.52, y5: -0.34 },
@@ -221,18 +222,93 @@ function PortfolioResults({ result }) {
               {metrics && (
                 <div style={{ marginTop: '1rem' }}>
                   <div style={{ color: '#6b7280', fontSize: '0.95rem', marginBottom: '0.5rem' }}>Evaluation</div>
-                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.5rem', background: '#f9fafb', border: '1px solid #e5e7eb', borderRadius: '0.75rem', padding: '0.6rem' }}>
-                    <div style={{ color: '#374151', fontSize: '0.9rem' }}>Sharpe: <span style={{ fontWeight: 600 }}>{Number(metrics.sharpe).toFixed(2)}</span></div>
-                    <div style={{ color: '#374151', fontSize: '0.9rem' }}>Sortino: <span style={{ fontWeight: 600 }}>{Number(metrics.sortino).toFixed(2)}</span></div>
-                    <div style={{ color: '#374151', fontSize: '0.9rem' }}>Vol (mo): <span style={{ fontWeight: 600 }}>{Number(metrics.vol_monthly).toFixed(3)}</span></div>
-                    <div style={{ color: '#374151', fontSize: '0.9rem' }}>Risk (annual): <span style={{ fontWeight: 600 }}>{(Number(metrics.vol_annual) * 100).toFixed(2)}%</span></div>
-                    <div style={{ color: metrics.short_term_1w >= 0 ? '#16a34a' : '#dc2626', fontSize: '0.9rem' }}>1W: <span style={{ fontWeight: 600 }}>{metrics.short_term_1w == null ? 'n/a' : `${(Number(metrics.short_term_1w) * 100).toFixed(2)}%`}</span></div>
-                    <div style={{ color: metrics.short_term_1m >= 0 ? '#16a34a' : '#dc2626', fontSize: '0.9rem' }}>1M: <span style={{ fontWeight: 600 }}>{metrics.short_term_1m == null ? 'n/a' : `${(Number(metrics.short_term_1m) * 100).toFixed(2)}%`}</span></div>
-                    <div style={{ color: '#374151', fontSize: '0.9rem' }}>MaxDD: <span style={{ fontWeight: 600 }}>{Number(metrics.max_drawdown).toFixed(3)}</span></div>
-                    <div style={{ color: '#374151', fontSize: '0.9rem' }}>CVaR95: <span style={{ fontWeight: 600 }}>{Number(metrics.cvar_95).toFixed(3)}</span></div>
-                    <div style={{ color: '#374151', fontSize: '0.9rem' }}>Rolling Sharpe (12m): <span style={{ fontWeight: 600 }}>{Number(metrics.rolling_sharpe_12m).toFixed(2)}</span></div>
-                    <div style={{ color: '#374151', fontSize: '0.9rem' }}>Rolling MaxDD (12m): <span style={{ fontWeight: 600 }}>{Number(metrics.rolling_mdd_12m).toFixed(3)}</span></div>
-                    <div style={{ color: '#374151', fontSize: '0.9rem' }}>Turnover vs model: <span style={{ fontWeight: 600 }}>{Number(metrics.avg_turnover).toFixed(3)}</span></div>
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.6rem', background: '#f9fafb', border: '1px solid #e5e7eb', borderRadius: '0.75rem', padding: '0.75rem' }}>
+                    {(() => {
+                      const fmtPct = (v) => `${(Number(v) * 100).toFixed(2)}%`;
+                      const colorFor = (metric, val) => {
+                        const v = Number(val);
+                        switch(metric){
+                          case 'sharpe':
+                            if (v >= 1.5) return '#16a34a';
+                            if (v >= 1.0) return '#f59e0b';
+                            return '#dc2626';
+                          case 'sortino':
+                            if (v >= 2.0) return '#16a34a';
+                            if (v >= 1.2) return '#f59e0b';
+                            return '#dc2626';
+                          case 'vol_annual': // lower better
+                            if (v <= 0.10) return '#16a34a';
+                            if (v <= 0.18) return '#f59e0b';
+                            return '#dc2626';
+                          case 'maxdd': // lower better
+                            if (v <= 0.20) return '#16a34a';
+                            if (v <= 0.35) return '#f59e0b';
+                            return '#dc2626';
+                          case 'cvar95': // lower better
+                            if (v >= 0) return '#6b7280';
+                            if (v >= -0.10) return '#f59e0b';
+                            return '#dc2626';
+                          case 'ret_1m':
+                            if (v >= 0.03) return '#16a34a';
+                            if (v >= 0.00) return '#f59e0b';
+                            return '#dc2626';
+                          default:
+                            return '#374151';
+                        }
+                      };
+
+                      const Tooltip = ({ text }) => (
+                        <span className="tip-trigger" style={{ marginLeft: 6, color: '#6b7280', fontSize: 12, position: 'relative', display: 'inline-block', cursor: 'help' }} title={text}>
+                          ⓘ
+                          <span style={{
+                            visibility: 'hidden', opacity: 0, transition: 'opacity 0.15s ease', position: 'absolute', zIndex: 1000,
+                            background: '#111827', color: '#fff', padding: '6px 8px', borderRadius: 6,
+                            top: '120%', left: 0, whiteSpace: 'nowrap', boxShadow: '0 2px 8px rgba(0,0,0,0.2)'
+                          }} className="metric-tip">{text}</span>
+                        </span>
+                      );
+
+                      const tipStyles = `
+                        .metric-row:hover .metric-tip { visibility: visible; opacity: 1; }
+                        .tip-trigger:hover .metric-tip { visibility: visible; opacity: 1; }
+                      `;
+
+                      return (
+                        <>
+                          <style>{tipStyles}</style>
+                          <div className="metric-row" style={{ color: colorFor('sharpe', metrics.sharpe), fontSize: '0.9rem' }}>
+                            Sharpe:
+                            <span style={{ fontWeight: 600, marginLeft: 6 }}>{Number(metrics.sharpe).toFixed(2)}</span>
+                            <Tooltip text="Sharpe Ratio: risk-adjusted return (higher is better). Typical: <1 weak, 1-2 decent, >2 strong." />
+                          </div>
+                          <div className="metric-row" style={{ color: colorFor('sortino', metrics.sortino), fontSize: '0.9rem' }}>
+                            Sortino:
+                            <span style={{ fontWeight: 600, marginLeft: 6 }}>{Number(metrics.sortino).toFixed(2)}</span>
+                            <Tooltip text="Sortino Ratio: focuses on downside risk (higher is better). Typical: <1 weak, 1-2 decent, >2 strong." />
+                          </div>
+                          <div className="metric-row" style={{ color: colorFor('vol_annual', metrics.vol_annual), fontSize: '0.9rem' }}>
+                            Risk (annual):
+                            <span style={{ fontWeight: 600, marginLeft: 6 }}>{fmtPct(metrics.vol_annual)}</span>
+                            <Tooltip text="Annualized volatility: dispersion of returns (lower is better). Typical: 8%-12% conservative, 12%-18% moderate, >18% high." />
+                          </div>
+                          <div className="metric-row" style={{ color: colorFor('maxdd', metrics.max_drawdown), fontSize: '0.9rem' }}>
+                            MaxDD:
+                            <span style={{ fontWeight: 600, marginLeft: 6 }}>{(Number(metrics.max_drawdown) * 100).toFixed(2)}%</span>
+                            <Tooltip text="Maximum drawdown: worst peak-to-trough loss (lower is better). Typical: <20% mild, 20%-35% moderate, >35% severe." />
+                          </div>
+                          <div className="metric-row" style={{ color: colorFor('ret_1m', metrics.short_term_1m), fontSize: '0.9rem' }}>
+                            1M:
+                            <span style={{ fontWeight: 600, marginLeft: 6 }}>{metrics.short_term_1m == null ? 'n/a' : fmtPct(metrics.short_term_1m)}</span>
+                            <Tooltip text="1-month total return: recent performance (higher is better). Typical: -5% to +5% depending on regime." />
+                          </div>
+                          <div className="metric-row" style={{ color: colorFor('cvar95', metrics.cvar_95), fontSize: '0.9rem' }}>
+                            CVaR95:
+                            <span style={{ fontWeight: 600, marginLeft: 6 }}>{fmtPct(metrics.cvar_95)}</span>
+                            <Tooltip text="CVaR 95%: average loss in worst 5% scenarios (lower is better). Often negative; closer to 0 is safer." />
+                          </div>
+                        </>
+                      );
+                    })()}
                   </div>
                 </div>
               )}
@@ -463,7 +539,29 @@ function AssetPerformanceTable({ data, checked, handleCheck, onCreatePortfolio, 
                       row.asset
                     )}
                   </td>
-                    {(() => { const vals = (row.asset === 'US Stock Market (S&P 500)' && sp500Averages) ? sp500Averages : { y1: row.y1, y3: row.y3, y5: row.y5 }; return (
+                    {(() => {
+                      let vals;
+                      if (row.asset === 'US Stock Market (S&P 500)') {
+                        // Compute average from subsectors; if some are selected, average selected; else average all
+                        const hasSubs = isSubsectorsProvided && Array.isArray(subsectors) && subsectors.length > 0;
+                        if (hasSubs) {
+                          const anySelected = Array.isArray(subChecked) && subChecked.some(Boolean);
+                          const rows = anySelected ? subsectors.filter((_, i) => subChecked[i]) : subsectors;
+                          const avg = (key) => {
+                            if (!rows.length) return 0;
+                            const s = rows.reduce((acc, s) => acc + (Number(s[key]) || 0), 0);
+                            return Math.round((s / rows.length) * 100) / 100;
+                          };
+                          vals = { y1: avg('y1'), y3: avg('y3'), y5: avg('y5') };
+                        } else if (sp500Averages) {
+                          vals = sp500Averages;
+                        } else {
+                          vals = { y1: row.y1, y3: row.y3, y5: row.y5 };
+                        }
+                      } else {
+                        vals = { y1: row.y1, y3: row.y3, y5: row.y5 };
+                      }
+                      return (
                     <>
                       <td style={{ background: vals.y1 > 0 ? '#d1fae5' : vals.y1 < 0 ? '#fee2e2' : '#f3f4f6', color: vals.y1 > 0 ? '#065f46' : vals.y1 < 0 ? '#991b1b' : '#22223b', borderRadius: '0.6rem', padding: '0.4rem 0.75rem', fontWeight: 600 }}>{vals.y1}%</td>
                       <td style={{ background: vals.y3 > 0 ? '#d1fae5' : vals.y3 < 0 ? '#fee2e2' : '#f3f4f6', color: vals.y3 > 0 ? '#065f46' : vals.y3 < 0 ? '#991b1b' : '#22223b', borderRadius: '0.6rem', padding: '0.4rem 0.75rem', fontWeight: 600 }}>{vals.y3}%</td>

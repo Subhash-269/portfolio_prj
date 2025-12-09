@@ -20,22 +20,25 @@ from drf_yasg import openapi
 
 # ---------- CONFIG & CONSTANTS ----------
 # Define these globally or inside the view if you want them dynamic
-WINDOW = 50
-BATCH_SIZE = 32
-EPOCHS = 40
-LR = 1e-3
-DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-SEED = 42
-TRAIN_TEST_SPLIT = 0.2
-TOP_K_DEFAULT = 10
-MAX_ASSETS = 40
+WINDOW = 1  # Lookback window (days) for time-series slices
+BATCH_SIZE = 8  # Mini-batch size for training
+EPOCHS = 100  # Max training epochs before early stopping
+LR = 1e-3  # Learning rate for Adam optimizer
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")  # Prefer GPU if available
+SEED = 42  # Random seed for reproducibility
+TRAIN_TEST_SPLIT = 0.3  # Test split fraction for holdout
+TOP_K_DEFAULT = 10  # Default number of top allocations to return
+MAX_ASSETS = 40  # Limit assets to control memory/compute
 
 # Default tuning config (can be overridden via request or Django settings)
 TUNING_DEFAULTS = {
-    'sector_cap': 0.20,
-    'momentum_weight': 0.40,
-    'target_vol_annual': 0.12,
-    'recent_days': 300,
+    'sector_cap': 0.6,  # Max total weight per sector in final mix
+    'momentum_weight': 0.40,  # Blend factor: 1M vs 1W momentum (return tilt)
+    'target_vol_annual': 0.12,  # Annualized volatility target for bisection blend
+    'recent_days': 300,  # History window for recent metrics (daily/monthly)
+    # Risk/Return loss weights (defaults used when payload omits)
+    'alpha_return': 2.0,  # Weight for mean portfolio return in training loss
+    'beta_risk': 0.5,  # Weight for portfolio risk (std) in training loss
 }
 
 # Ensure reproducibility
@@ -122,11 +125,11 @@ class AllocNetWithSectors(nn.Module):
 
 class PortfolioLoss:
     @staticmethod
-    def combined_loss(weights, returns, prev_weights=None, commission=0.0025):
+    def combined_loss(weights, returns, prev_weights=None, commission=0.0025, alpha_return=2.0, beta_risk=0.5):
         portfolio_returns = torch.sum(weights * returns, dim=1)
         mean_return = torch.mean(portfolio_returns)
         std_return = torch.std(portfolio_returns) + 1e-6
-        sharpe = mean_return / std_return
+        sharpe = mean_return / std_return if std_return.item() > 1e-12 else torch.tensor(0.0, device=returns.device)
         if prev_weights is not None:
             turnover = torch.sum(torch.abs(weights - prev_weights), dim=1).mean()
             transaction_cost = 0.001 * turnover
@@ -136,8 +139,14 @@ class PortfolioLoss:
         concentration_penalty = 0.1 * concentration
         entropy = -torch.sum(weights * torch.log(weights + 1e-8), dim=1).mean()
         diversity_bonus = 0.01 * entropy
-        loss = -10.0 * sharpe + transaction_cost + concentration_penalty - diversity_bonus
-        return loss, sharpe.item()
+        # Explicit risk-return tradeoff: minimize risk (std) and maximize return (mean)
+        risk_term = std_return
+        return_term = mean_return
+        loss_core = beta_risk * risk_term - alpha_return * return_term
+        # Preserve prior regularization terms
+        # loss = loss_core + transaction_cost + concentration_penalty - diversity_bonus
+        loss = loss_core #+ transaction_cost
+        return loss, sharpe.item(), return_term.item(), risk_term.item()
 
 # ---------- HELPER: Data Processing ----------
 
@@ -550,44 +559,59 @@ def train_by_sectors(request):
             recent_days = max(120, min(1000, recent_days))
         except Exception:
             recent_days = 250
+        # New: explicit risk/return tradeoff weights
+        alpha_return_req = request.data.get('alpha_return', cfg.get('alpha_return', TUNING_DEFAULTS['alpha_return']))
+        beta_risk_req = request.data.get('beta_risk', cfg.get('beta_risk', TUNING_DEFAULTS['beta_risk']))
+        try:
+            alpha_return = float(alpha_return_req)
+        except Exception:
+            alpha_return = TUNING_DEFAULTS['alpha_return']
+        try:
+            beta_risk = float(beta_risk_req)
+        except Exception:
+            beta_risk = TUNING_DEFAULTS['beta_risk']
 
         base_dir = getattr(settings, 'BASE_DIR', os.getcwd())
         stock_csv = os.path.join(base_dir, 'Training', 'diversified_market_data.csv')
         comm_csv = os.path.join(base_dir, 'Training', 'Commodities', 'commodities.csv')
 
         if us_list is not None or com_list is not None:
-            # Combined mode: merge stocks and commodities per lists
-            if not os.path.exists(stock_csv):
-                return Response({'error': 'US Stock data file not found on server'}, status=500)
-            if not os.path.exists(comm_csv):
-                return Response({'error': 'Commodities data file not found on server'}, status=500)
+            # Combined mode: merge stocks and commodities per lists (explicit inclusion only)
+            include_stocks = (isinstance(us_list, list) and len(us_list) > 0) or (isinstance(sectors, list) and len(sectors) > 0)
+            include_comms = isinstance(com_list, list) and len(com_list) > 0
 
-            df_stock = pd.read_csv(stock_csv)
-            df_comm = pd.read_csv(comm_csv)
-            if 'Date' in df_stock.columns:
-                df_stock['Date'] = pd.to_datetime(df_stock['Date'])
-            if 'Date' in df_comm.columns:
-                df_comm['Date'] = pd.to_datetime(df_comm['Date'])
+            # Load stocks if included
+            if include_stocks:
+                if not os.path.exists(stock_csv):
+                    return Response({'error': 'US Stock data file not found on server'}, status=500)
+                df_stock = pd.read_csv(stock_csv)
+                if 'Date' in df_stock.columns:
+                    df_stock['Date'] = pd.to_datetime(df_stock['Date'])
+            else:
+                df_stock = pd.DataFrame(columns=['Date','Ticker','Open','High','Low','Close','Volume'])
 
-            # Normalize commodities: use 'Commodity Type' as Ticker
-            if 'Commodity Type' not in df_comm.columns:
-                return Response({'error': 'Commodities CSV missing "Commodity Type" column'}, status=500)
-            df_comm = df_comm.rename(columns={'Commodity Type': 'Ticker'})
+            # Load commodities only if explicitly provided (non-empty list)
+            if include_comms:
+                if not os.path.exists(comm_csv):
+                    return Response({'error': 'Commodities data file not found on server'}, status=500)
+                df_comm = pd.read_csv(comm_csv)
+                if 'Date' in df_comm.columns:
+                    df_comm['Date'] = pd.to_datetime(df_comm['Date'])
+                # Normalize commodities: use 'Commodity Type' as Ticker
+                if 'Commodity Type' not in df_comm.columns:
+                    return Response({'error': 'Commodities CSV missing "Commodity Type" column'}, status=500)
+                df_comm = df_comm.rename(columns={'Commodity Type': 'Ticker'})
+            else:
+                df_comm = pd.DataFrame(columns=['Date','Ticker','Open','High','Low','Close','Volume'])
 
             # Ensure expected columns exist (Open/High/Low/Close/Volume)
             expected_cols = {'Date','Ticker','Open','High','Low','Close','Volume'}
             missing_stock = expected_cols - set(df_stock.columns)
             missing_comm = expected_cols - set(df_comm.columns)
-            if missing_stock:
+            if include_stocks and missing_stock:
                 return Response({'error': f'US Stock CSV missing columns: {sorted(missing_stock)}'}, status=500)
-            if missing_comm:
+            if include_comms and missing_comm:
                 return Response({'error': f'Commodities CSV missing columns: {sorted(missing_comm)}'}, status=500)
-
-            # Determine whether to include stocks at all
-            include_stocks = False
-            # Include stocks if either explicit US Stock tickers provided or sectors provided
-            if (isinstance(us_list, list) and len(us_list) > 0) or (isinstance(sectors, list) and len(sectors) > 0):
-                include_stocks = True
 
             # Apply filters when including stocks
             if include_stocks:
@@ -604,16 +628,13 @@ def train_by_sectors(request):
                         df_stock = df_stock[df_stock['Ticker'].isin(tickers_by_sector)]
                 if isinstance(us_list, list) and len(us_list) > 0:
                     df_stock = df_stock[df_stock['Ticker'].isin(us_list)]
-            else:
-                # Exclude stocks entirely if no stock selection provided
-                df_stock = df_stock.iloc[0:0]
 
-            # Filter commodities by provided list (if any)
-            if isinstance(com_list, list) and len(com_list) > 0:
+            # Filter commodities strictly to provided list
+            if include_comms:
                 df_comm = df_comm[df_comm['Ticker'].isin(com_list)]
 
             # Track commodities used for response context
-            comm_assets_used = sorted(set(df_comm['Ticker'].unique().tolist()))
+            comm_assets_used = sorted(set(df_comm['Ticker'].unique().tolist())) if include_comms else []
 
             # Merge datasets (only non-empty parts will contribute)
             df_all = pd.concat([df_stock, df_comm], ignore_index=True)
@@ -622,9 +643,10 @@ def train_by_sectors(request):
 
             # Build/extend mapper: use existing for stocks, add commodities → sector "Commodities"
             mapper = load_or_build_mapper() or {}
-            for ct in df_comm['Ticker'].unique().tolist():
-                if ct not in mapper:
-                    mapper[ct] = {'sector': 'Commodities', 'abbr': str(ct)[:6]}
+            if include_comms:
+                for ct in df_comm['Ticker'].unique().tolist():
+                    if ct not in mapper:
+                        mapper[ct] = {'sector': 'Commodities', 'abbr': str(ct)[:6]}
 
             selected_tickers = sorted(set(df_all['Ticker'].unique().tolist()))
             if len(selected_tickers) < 2:
@@ -715,7 +737,9 @@ def train_by_sectors(request):
                 yb = torch.from_numpy(yb_np).float().to(DEVICE) if not isinstance(yb_np, torch.Tensor) else yb_np.float().to(DEVICE)
                 opt.zero_grad()
                 w = model(xb)
-                loss, batch_sharpe = PortfolioLoss.combined_loss(w, yb, prev_weights=w.detach())
+                loss, batch_sharpe, batch_return, batch_risk = PortfolioLoss.combined_loss(
+                    w, yb, prev_weights=w.detach(), alpha_return=alpha_return, beta_risk=beta_risk
+                )
                 if torch.isnan(loss) or torch.isinf(loss):
                     continue
                 loss.backward()
@@ -735,7 +759,9 @@ def train_by_sectors(request):
                 X_val_t = torch.from_numpy(X_val).float().to(DEVICE)
                 Y_val_t = torch.from_numpy(Y_val).float().to(DEVICE)
                 w_val = model(X_val_t)
-                val_loss, val_sharpe = PortfolioLoss.combined_loss(w_val, Y_val_t, prev_weights=w_val.detach())
+                val_loss, val_sharpe, val_return, val_risk = PortfolioLoss.combined_loss(
+                    w_val, Y_val_t, prev_weights=w_val.detach(), alpha_return=alpha_return, beta_risk=beta_risk
+                )
                 avg_val_loss = val_loss.item()
             scheduler.step()
 
@@ -936,8 +962,8 @@ def train_by_sectors(request):
         for s, a in sorted(sector_alloc.items(), key=lambda x: -x[1]):
             print(f"  {s:24s}: {a:6.2f}%")
 
-        # Ensure sectors field reflects training inputs:
-        # - If commodities were used, include 'Commodities' alongside any provided stock sectors
+            # Ensure sectors field reflects training inputs:
+            # - If commodities were used, include 'Commodities' alongside any provided stock sectors
         out_sectors = sectors if sectors else []
         try:
             req_com = request.data.get('Commodities')
@@ -958,6 +984,8 @@ def train_by_sectors(request):
                 'momentum_weight': momentum_weight,
                 'target_vol_annual': target_vol_annual,
                 'recent_days': recent_days,
+                'alpha_return': alpha_return,
+                'beta_risk': beta_risk,
                 'window': window,
                 'epochs': epochs,
                 'top_k': top_k if isinstance(top_k, int) else TOP_K_DEFAULT
