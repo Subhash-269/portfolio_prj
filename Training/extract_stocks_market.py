@@ -2,23 +2,23 @@ import pandas_datareader.data as web
 from datetime import datetime
 import pandas as pd
 
-# 30 Diversified Tickers (Tech, Finance, Health, Energy, Commodities)
-tickers = [
-    # Tech
-    "AAPL", "MSFT", "GOOGL", "NVDA", "AMD", "INTC",
-    # Finance
-    "JPM", "BAC", "V", "MA",
-    # Healthcare
-    "JNJ", "PFE", "UNH", "MRK",
-    # Consumer
-    "AMZN", "TSLA", "KO", "PG", "WMT", "HD",
-    # Industrial & Energy
-    "XOM", "CVX", "CAT", "BA",
-    # Real Estate
-    "O", "AMT",
-    # ETFs (Market, Gold, Bonds)
-    "SPY", "QQQ", "GLD", "TLT"
-]
+# # 30 Diversified Tickers (Tech, Finance, Health, Energy, Commodities)
+# tickers = [
+#     # Tech
+#     "AAPL", "MSFT", "GOOGL", "NVDA", "AMD", "INTC",
+#     # Finance
+#     "JPM", "BAC", "V", "MA",
+#     # Healthcare
+#     "JNJ", "PFE", "UNH", "MRK",
+#     # Consumer
+#     "AMZN", "TSLA", "KO", "PG", "WMT", "HD",
+#     # Industrial & Energy
+#     "XOM", "CVX", "CAT", "BA",
+#     # Real Estate
+#     "O", "AMT",
+#     # ETFs (Market, Gold, Bonds)
+#     "SPY", "QQQ", "GLD", "TLT"
+# ]
 
 survivors_df = pd.read_csv("sp500_companies.csv")
 tickers = survivors_df["Symbol"].tolist()

@@ -8,6 +8,7 @@ from sklearn.model_selection import train_test_split
 import matplotlib.pyplot as plt
 import os
 import torch.utils.data as data
+import json
 
 # ---------- CONFIG ----------
 CSV_PATH = "diversified_market_data.csv" 
@@ -27,40 +28,77 @@ MAX_ASSETS = 40
 np.random.seed(SEED)
 torch.manual_seed(SEED)
 
-# ---------- SECTOR MAPPING ----------
-SECTOR_MAP = {
-    # Technology
-    'AAPL': 'Technology', 'MSFT': 'Technology', 'GOOGL': 'Technology', 
-    'NVDA': 'Technology', 'META': 'Technology', 'TSLA': 'Technology',
-    'AMD': 'Technology', 'INTC': 'Technology', 'ORCL': 'Technology',
-    'AVGO': 'Technology', 'CRM': 'Technology', 'ADBE': 'Technology',
-    
-    # Finance
-    'JPM': 'Finance', 'BAC': 'Finance', 'WFC': 'Finance', 
-    'GS': 'Finance', 'MS': 'Finance', 'C': 'Finance',
-    'V': 'Finance', 'MA': 'Finance', 'AXP': 'Finance',
-    
-    # Healthcare
-    'JNJ': 'Healthcare', 'UNH': 'Healthcare', 'PFE': 'Healthcare',
-    'ABBV': 'Healthcare', 'TMO': 'Healthcare', 'MRK': 'Healthcare',
-    'LLY': 'Healthcare', 'ABT': 'Healthcare',
-    
-    # Consumer
-    'AMZN': 'Consumer', 'WMT': 'Consumer', 'HD': 'Consumer',
-    'NKE': 'Consumer', 'MCD': 'Consumer', 'SBUX': 'Consumer',
-    'COST': 'Consumer', 'TGT': 'Consumer',
-    
-    # Energy
-    'XOM': 'Energy', 'CVX': 'Energy', 'COP': 'Energy',
-    'SLB': 'Energy', 'EOG': 'Energy',
-    
-    # Industrials
-    'BA': 'Industrials', 'CAT': 'Industrials', 'GE': 'Industrials',
-    'UPS': 'Industrials', 'HON': 'Industrials',
-    
-    # ETFs/Index
-    'SPY': 'Index', 'QQQ': 'Index', 'IWM': 'Index', 'DIA': 'Index',
-}
+# ---------- MAPPER (Ticker → GICS Sector, Abbreviation) ----------
+def load_or_build_mapper():
+    """
+    Load Training/mapper.json if present; otherwise build it from
+    Training/sp500_companies.csv (Symbol, GICS Sector, optionally Security).
+    Returns dict: { ticker: { 'sector': str, 'abbr': str } } or {}.
+    """
+    # Candidate paths
+    mapper_paths = [os.path.join('Training', 'mapper.json'), 'mapper.json']
+    csv_paths = [os.path.join('Training', 'sp500_companies.csv'), 'sp500_companies.csv']
+
+    # Try loading existing mapper
+    for mp in mapper_paths:
+        if os.path.exists(mp):
+            try:
+                with open(mp, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                    return data if isinstance(data, dict) else {}
+            except Exception:
+                pass
+
+    # Build mapper from CSV
+    csv_path = None
+    for cp in csv_paths:
+        if os.path.exists(cp):
+            csv_path = cp
+            break
+    if not csv_path:
+        return {}
+
+    try:
+        df = pd.read_csv(csv_path)
+    except Exception:
+        return {}
+
+    # Detect columns
+    cols = {c.lower(): c for c in df.columns}
+    sym_col = cols.get('symbol') or cols.get('ticker')
+    sec_col = cols.get('gics sector') or cols.get('sector')
+    abbr_col = cols.get('security')
+    if not sym_col or not sec_col:
+        return {}
+
+    mapper = {}
+    use_cols = [sym_col, sec_col] + ([abbr_col] if abbr_col else [])
+    for _, row in df[use_cols].dropna().iterrows():
+        sym = str(row[sym_col]).strip()
+        sec = str(row[sec_col]).strip()
+        abbr = str(row[abbr_col]).strip() if abbr_col else ''
+        if sym:
+            mapper[sym] = {'sector': sec, 'abbr': abbr}
+
+    # Persist mapper
+    mp = mapper_paths[0]
+    try:
+        os.makedirs(os.path.dirname(mp), exist_ok=True)
+        with open(mp, 'w', encoding='utf-8') as f:
+            json.dump(mapper, f, indent=2)
+    except Exception:
+        pass
+    return mapper
+
+MAPPER = load_or_build_mapper()
+
+def sector_of(ticker):
+    val = MAPPER.get(ticker)
+    if isinstance(val, dict):
+        return val.get('sector', 'Other')
+    if isinstance(val, str):
+        return val
+    return 'Other'
 
 # ---------- UTIL: metrics ----------
 def portfolio_metrics(portfolio_values, periods_per_year=252):
@@ -191,9 +229,9 @@ if len(close_mat) < WINDOW + 1:
     raise RuntimeError(f"Not enough data! Need > {WINDOW} rows, but got {len(close_mat)}.")
 
 # ---------- CREATE SECTOR FEATURES ----------
-def create_sector_encoding(tickers, sector_map):
+def create_sector_encoding(tickers):
     """Create one-hot encoding for sectors"""
-    sectors = list(set(sector_map.get(t, 'Other') for t in tickers))
+    sectors = list(set(sector_of(t) for t in tickers))
     sectors.sort()
     sector_to_idx = {s: i for i, s in enumerate(sectors)}
     
@@ -201,13 +239,13 @@ def create_sector_encoding(tickers, sector_map):
     
     sector_matrix = np.zeros((len(tickers), len(sectors)))
     for i, ticker in enumerate(tickers):
-        sector = sector_map.get(ticker, 'Other')
+        sector = sector_of(ticker)
         sector_idx = sector_to_idx[sector]
         sector_matrix[i, sector_idx] = 1.0
     
     return sector_matrix, sectors
 
-sector_encoding, sector_names = create_sector_encoding(TICKERS, SECTOR_MAP)
+sector_encoding, sector_names = create_sector_encoding(TICKERS)
 print(f"Sector encoding shape: {sector_encoding.shape}\n")
 
 # ---------- STEP 3: Build Enhanced Tensors with Sector Features ----------
@@ -550,7 +588,7 @@ alloc_data = []
 for idx in top_k_indices:
     ticker = TICKERS[idx]
     weight = future_weights[idx] * 100
-    sector = SECTOR_MAP.get(ticker, 'Other')
+    sector = sector_of(ticker)
     alloc_data.append({
         "Rank": len(alloc_data) + 1,
         "Ticker": ticker,
