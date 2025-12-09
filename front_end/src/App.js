@@ -43,7 +43,8 @@ const assetPerformanceData = [
   // { asset: 'Gold', y1: 57.94, y3: 33.02, y5: 18.40 },
   // { asset: 'Intl Developed Markets', y1: 26.26, y3: 15.87, y5: 9.49 },
   // { asset: 'Emerging Markets', y1: 22.81, y3: 14.30, y5: 6.22 },
-  { asset: 'US Stock Market (S&P 500)', y1: 17.53, y3: 24.89, y5: 16.45 },
+  // S&P 500 row values are computed dynamically from sector rows; keep placeholders neutral
+  { asset: 'US Stock Market (S&P 500)', y1: 0, y3: 0, y5: 0 },
   // { asset: 'Commodities', y1: 15.84, y3: 4.26, y5: 11.62 },
   // { asset: 'Intermediate Treasuries', y1: 6.44, y3: 4.17, y5: -0.18 },
   // { asset: 'Total Bond Market', y1: 5.70, y3: 4.52, y5: -0.34 },
@@ -463,7 +464,29 @@ function AssetPerformanceTable({ data, checked, handleCheck, onCreatePortfolio, 
                       row.asset
                     )}
                   </td>
-                    {(() => { const vals = (row.asset === 'US Stock Market (S&P 500)' && sp500Averages) ? sp500Averages : { y1: row.y1, y3: row.y3, y5: row.y5 }; return (
+                    {(() => {
+                      let vals;
+                      if (row.asset === 'US Stock Market (S&P 500)') {
+                        // Compute average from subsectors; if some are selected, average selected; else average all
+                        const hasSubs = isSubsectorsProvided && Array.isArray(subsectors) && subsectors.length > 0;
+                        if (hasSubs) {
+                          const anySelected = Array.isArray(subChecked) && subChecked.some(Boolean);
+                          const rows = anySelected ? subsectors.filter((_, i) => subChecked[i]) : subsectors;
+                          const avg = (key) => {
+                            if (!rows.length) return 0;
+                            const s = rows.reduce((acc, s) => acc + (Number(s[key]) || 0), 0);
+                            return Math.round((s / rows.length) * 100) / 100;
+                          };
+                          vals = { y1: avg('y1'), y3: avg('y3'), y5: avg('y5') };
+                        } else if (sp500Averages) {
+                          vals = sp500Averages;
+                        } else {
+                          vals = { y1: row.y1, y3: row.y3, y5: row.y5 };
+                        }
+                      } else {
+                        vals = { y1: row.y1, y3: row.y3, y5: row.y5 };
+                      }
+                      return (
                     <>
                       <td style={{ background: vals.y1 > 0 ? '#d1fae5' : vals.y1 < 0 ? '#fee2e2' : '#f3f4f6', color: vals.y1 > 0 ? '#065f46' : vals.y1 < 0 ? '#991b1b' : '#22223b', borderRadius: '0.6rem', padding: '0.4rem 0.75rem', fontWeight: 600 }}>{vals.y1}%</td>
                       <td style={{ background: vals.y3 > 0 ? '#d1fae5' : vals.y3 < 0 ? '#fee2e2' : '#f3f4f6', color: vals.y3 > 0 ? '#065f46' : vals.y3 < 0 ? '#991b1b' : '#22223b', borderRadius: '0.6rem', padding: '0.4rem 0.75rem', fontWeight: 600 }}>{vals.y3}%</td>
