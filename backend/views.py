@@ -498,60 +498,140 @@ train_sectors_schema = openapi.Schema(
 @api_view(['POST'])
 def train_by_sectors(request):
     try:
-        sectors = request.data.get('sectors', [])
-        if not sectors:
-            return Response({'error': 'No sectors provided'}, status=400)
+        comm_assets_used = []
+        # New payload support: {"US Stock": [tickers], "Commodities": [commodity types]}
+        us_list = request.data.get('US Stock')
+        com_list = request.data.get('Commodities')
+        sectors = request.data.get('sectors')
 
         top_k = int(request.data.get('top_k', TOP_K_DEFAULT))
         window = int(request.data.get('window', WINDOW))
         epochs = int(request.data.get('epochs', EPOCHS))
 
-        # Load CSV
         base_dir = getattr(settings, 'BASE_DIR', os.getcwd())
-        csv_path = os.path.join(base_dir, 'Training', 'diversified_market_data.csv')
-        # if not os.path.exists(csv_path):
-        #     csv_path = "Training/stocks_market_data.csv"
-        if not os.path.exists(csv_path):
-            return Response({'error': 'Data file not found on server'}, status=500)
+        stock_csv = os.path.join(base_dir, 'Training', 'diversified_market_data.csv')
+        comm_csv = os.path.join(base_dir, 'Training', 'Commodities', 'commodities.csv')
 
-        print("[train_by_sectors] Loading CSV:", csv_path)
-        df = pd.read_csv(csv_path)
-        if 'Date' in df.columns:
-            df['Date'] = pd.to_datetime(df['Date'])
+        if us_list is not None or com_list is not None:
+            # Combined mode: merge stocks and commodities per lists
+            if not os.path.exists(stock_csv):
+                return Response({'error': 'US Stock data file not found on server'}, status=500)
+            if not os.path.exists(comm_csv):
+                return Response({'error': 'Commodities data file not found on server'}, status=500)
 
-        # Map sectors → tickers using mapper.json (Ticker → GICS Sector)
-        mapper = load_or_build_mapper()
-        print(f"[train_by_sectors] Requested sectors: {sectors}")
-        print(f"[train_by_sectors] Mapper entries: {len(mapper)}")
-        # Normalize sector names for case-insensitive match
-        norm = lambda s: str(s).strip().lower()
-        wanted = {norm(s) for s in sectors}
+            df_stock = pd.read_csv(stock_csv)
+            df_comm = pd.read_csv(comm_csv)
+            if 'Date' in df_stock.columns:
+                df_stock['Date'] = pd.to_datetime(df_stock['Date'])
+            if 'Date' in df_comm.columns:
+                df_comm['Date'] = pd.to_datetime(df_comm['Date'])
 
-        available_tickers = set(df['Ticker'].unique().tolist())
-        print(f"[train_by_sectors] Available tickers in CSV: {len(available_tickers)}")
-        selected_tickers = []
-        for t in available_tickers:
-            val = mapper.get(t)
-            sec = val.get('sector') if isinstance(val, dict) else val
-            if sec and norm(sec) in wanted:
-                selected_tickers.append(t)
-        selected_tickers = sorted(set(selected_tickers))
-        print (f"[train_by_sectors] Selected tickers for sectors {sectors}: count={len(selected_tickers)}")
-        print ("[train_by_sectors] Sample tickers:", selected_tickers[:20])
-        if len(selected_tickers) < 2:
-            return Response({'error': f'Not enough tickers found for sectors {sectors}. Found: {selected_tickers}'}, status=400)
+            # Normalize commodities: use 'Commodity Type' as Ticker
+            if 'Commodity Type' not in df_comm.columns:
+                return Response({'error': 'Commodities CSV missing "Commodity Type" column'}, status=500)
+            df_comm = df_comm.rename(columns={'Commodity Type': 'Ticker'})
 
-        # Prepare enhanced dataset with sector features (matching training_div.py)
-        try:
-            X_array, Y_array, X_final, TICKERS, num_sectors = build_enhanced_dataset_with_sectors(df, selected_tickers, mapper, window, MAX_ASSETS)
-            print(f"[train_by_sectors] Prepared enhanced data: X_array={X_array.shape}, Y_array={Y_array.shape}, X_final={X_final.shape}, assets={len(TICKERS)}, sectors={num_sectors}")
-            # Mirror training_div prints
-            print(f"Dataset created: {X_array.shape} samples")
-            total_channels = X_array.shape[1]
-            sector_channels = max(0, total_channels - 3)
-            print(f"Features: 3 price + {sector_channels} sector = {total_channels} total channels")
-        except ValueError as e:
-            return Response({'error': str(e)}, status=400)
+            # Ensure expected columns exist (Open/High/Low/Close/Volume)
+            expected_cols = {'Date','Ticker','Open','High','Low','Close','Volume'}
+            missing_stock = expected_cols - set(df_stock.columns)
+            missing_comm = expected_cols - set(df_comm.columns)
+            if missing_stock:
+                return Response({'error': f'US Stock CSV missing columns: {sorted(missing_stock)}'}, status=500)
+            if missing_comm:
+                return Response({'error': f'Commodities CSV missing columns: {sorted(missing_comm)}'}, status=500)
+
+            # Determine whether to include stocks at all
+            include_stocks = False
+            # Include stocks if either explicit US Stock tickers provided or sectors provided
+            if (isinstance(us_list, list) and len(us_list) > 0) or (isinstance(sectors, list) and len(sectors) > 0):
+                include_stocks = True
+
+            # Apply filters when including stocks
+            if include_stocks:
+                if sectors:
+                    mapper = load_or_build_mapper() or {}
+                    norm = lambda s: str(s).strip().lower()
+                    wanted = {norm(s) for s in sectors}
+                    def _sector_of(t):
+                        val = mapper.get(t)
+                        sec = val.get('sector') if isinstance(val, dict) else val
+                        return sec
+                    tickers_by_sector = [t for t in df_stock['Ticker'].unique().tolist() if _sector_of(t) and norm(_sector_of(t)) in wanted]
+                    if tickers_by_sector:
+                        df_stock = df_stock[df_stock['Ticker'].isin(tickers_by_sector)]
+                if isinstance(us_list, list) and len(us_list) > 0:
+                    df_stock = df_stock[df_stock['Ticker'].isin(us_list)]
+            else:
+                # Exclude stocks entirely if no stock selection provided
+                df_stock = df_stock.iloc[0:0]
+
+            # Filter commodities by provided list (if any)
+            if isinstance(com_list, list) and len(com_list) > 0:
+                df_comm = df_comm[df_comm['Ticker'].isin(com_list)]
+
+            # Track commodities used for response context
+            comm_assets_used = sorted(set(df_comm['Ticker'].unique().tolist()))
+
+            # Merge datasets (only non-empty parts will contribute)
+            df_all = pd.concat([df_stock, df_comm], ignore_index=True)
+            if df_all.empty:
+                return Response({'error': 'No data after filtering US Stock and Commodities selections'}, status=400)
+
+            # Build/extend mapper: use existing for stocks, add commodities → sector "Commodities"
+            mapper = load_or_build_mapper() or {}
+            for ct in df_comm['Ticker'].unique().tolist():
+                if ct not in mapper:
+                    mapper[ct] = {'sector': 'Commodities', 'abbr': str(ct)[:6]}
+
+            selected_tickers = sorted(set(df_all['Ticker'].unique().tolist()))
+            if len(selected_tickers) < 2:
+                return Response({'error': f'Need at least 2 assets, found: {selected_tickers}'}, status=400)
+
+            try:
+                X_array, Y_array, X_final, TICKERS, num_sectors = build_enhanced_dataset_with_sectors(df_all, selected_tickers, mapper, window, MAX_ASSETS)
+                print(f"[train_by_sectors] Prepared enhanced data (combined): X_array={X_array.shape}, Y_array={Y_array.shape}, X_final={X_final.shape}, assets={len(TICKERS)}, sectors={num_sectors}")
+                print(f"Dataset created: {X_array.shape} samples")
+                total_channels = X_array.shape[1]
+                sector_channels = max(0, total_channels - 3)
+                print(f"Features: 3 price + {sector_channels} sector = {total_channels} total channels")
+            except ValueError as e:
+                return Response({'error': str(e)}, status=400)
+        else:
+            # Backward-compat: sector-based selection using mapper
+            if not sectors:
+                return Response({'error': 'Provide either sectors or {"US Stock"/"Commodities"} selections'}, status=400)
+
+            if not os.path.exists(stock_csv):
+                return Response({'error': 'US Stock data file not found on server'}, status=500)
+            df = pd.read_csv(stock_csv)
+            if 'Date' in df.columns:
+                df['Date'] = pd.to_datetime(df['Date'])
+
+            mapper = load_or_build_mapper()
+            print(f"[train_by_sectors] Requested sectors: {sectors}")
+            print(f"[train_by_sectors] Mapper entries: {len(mapper)}")
+            norm = lambda s: str(s).strip().lower()
+            wanted = {norm(s) for s in sectors}
+            available_tickers = set(df['Ticker'].unique().tolist())
+            selected_tickers = []
+            for t in available_tickers:
+                val = mapper.get(t)
+                sec = val.get('sector') if isinstance(val, dict) else val
+                if sec and norm(sec) in wanted:
+                    selected_tickers.append(t)
+            selected_tickers = sorted(set(selected_tickers))
+            if len(selected_tickers) < 2:
+                return Response({'error': f'Not enough tickers found for sectors {sectors}. Found: {selected_tickers}'}, status=400)
+
+            try:
+                X_array, Y_array, X_final, TICKERS, num_sectors = build_enhanced_dataset_with_sectors(df, selected_tickers, mapper, window, MAX_ASSETS)
+                print(f"[train_by_sectors] Prepared enhanced data: X_array={X_array.shape}, Y_array={Y_array.shape}, X_final={X_final.shape}, assets={len(TICKERS)}, sectors={num_sectors}")
+                print(f"Dataset created: {X_array.shape} samples")
+                total_channels = X_array.shape[1]
+                sector_channels = max(0, total_channels - 3)
+                print(f"Features: 3 price + {sector_channels} sector = {total_channels} total channels")
+            except ValueError as e:
+                return Response({'error': str(e)}, status=400)
 
         # Train/val split
         from sklearn.model_selection import train_test_split as _tts
@@ -662,11 +742,23 @@ def train_by_sectors(request):
         for s, a in sorted(sector_alloc.items(), key=lambda x: -x[1]):
             print(f"  {s:24s}: {a:6.2f}%")
 
+        # Ensure sectors field reflects training inputs:
+        # - If commodities were used, include 'Commodities' alongside any provided stock sectors
+        out_sectors = sectors if sectors else []
+        try:
+            req_com = request.data.get('Commodities')
+            if isinstance(req_com, list) and len(req_com) > 0:
+                if 'Commodities' not in out_sectors:
+                    out_sectors = list(out_sectors) + ['Commodities']
+        except Exception:
+            pass
+
         return Response({
             'status': 'success',
-            'sectors': sectors,
+            'sectors': out_sectors,
             'tickers_used': TICKERS,
-            'portfolio': portfolio
+            'portfolio': portfolio,
+            'assets_used': comm_assets_used if 'comm_assets_used' in locals() else []
         })
 
     except Exception as e:
