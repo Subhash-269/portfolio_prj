@@ -30,6 +30,14 @@ TRAIN_TEST_SPLIT = 0.2
 TOP_K_DEFAULT = 10
 MAX_ASSETS = 40
 
+# Default tuning config (can be overridden via request or Django settings)
+TUNING_DEFAULTS = {
+    'sector_cap': 0.20,
+    'momentum_weight': 0.40,
+    'target_vol_annual': 0.12,
+    'recent_days': 300,
+}
+
 # Ensure reproducibility
 np.random.seed(SEED)
 torch.manual_seed(SEED)
@@ -515,6 +523,33 @@ def train_by_sectors(request):
             top_k = TOP_K_DEFAULT
         window = int(request.data.get('window', WINDOW))
         epochs = int(request.data.get('epochs', EPOCHS))
+        # New tuning knobs (optional)
+        # Load defaults from settings if provided, else use module defaults
+        cfg = getattr(settings, 'PORTFOLIO_TUNING_DEFAULTS', TUNING_DEFAULTS)
+        sector_cap_req = request.data.get('sector_cap', cfg.get('sector_cap', TUNING_DEFAULTS['sector_cap']))
+        momentum_weight_req = request.data.get('momentum_weight', cfg.get('momentum_weight', TUNING_DEFAULTS['momentum_weight']))
+        target_vol_annual_req = request.data.get('target_vol_annual', cfg.get('target_vol_annual', TUNING_DEFAULTS['target_vol_annual']))
+        recent_days_req = request.data.get('recent_days', cfg.get('recent_days', TUNING_DEFAULTS['recent_days']))
+        try:
+            sector_cap = float(sector_cap_req)
+        except Exception:
+            sector_cap = 0.30
+        try:
+            momentum_weight = float(momentum_weight_req)
+            momentum_weight = max(0.0, min(1.0, momentum_weight))
+        except Exception:
+            momentum_weight = 0.50
+        try:
+            target_vol_annual = float(target_vol_annual_req) if target_vol_annual_req is not None else None
+            if target_vol_annual is not None:
+                target_vol_annual = max(0.02, min(0.40, target_vol_annual))
+        except Exception:
+            target_vol_annual = None
+        try:
+            recent_days = int(recent_days_req)
+            recent_days = max(120, min(1000, recent_days))
+        except Exception:
+            recent_days = 250
 
         base_dir = getattr(settings, 'BASE_DIR', os.getcwd())
         stock_csv = os.path.join(base_dir, 'Training', 'diversified_market_data.csv')
@@ -723,13 +758,159 @@ def train_by_sectors(request):
             future_weights = model(Xf).cpu().numpy().flatten()
         print(f"[train_by_sectors] Inference weights: min={future_weights.min():.6f} max={future_weights.max():.6f} sum={future_weights.sum():.6f}")
 
+        # --- Balanced Post-Processing using evaluation metrics ---
+        # Build recent returns matrices to compute momentum, volatility and covariance
+        try:
+            def _pivot_close(df_local):
+                p = df_local.pivot(index='Date', columns='Ticker', values='Close').sort_index()
+                return p[TICKERS].ffill().bfill()
+
+            close_mat_all = _pivot_close(df_all if 'df_all' in locals() else df)
+            # Limit to a reasonable recent window for metrics
+            close_recent = close_mat_all.tail(recent_days)
+            daily_ret = close_recent.pct_change().dropna()
+            # Monthly returns for covariance-based risk
+            monthly_close = close_mat_all.resample('ME').last().dropna()
+            monthly_ret = monthly_close.pct_change().dropna()
+            cov_m = monthly_ret.cov().values
+
+            # Per-asset daily vol and momentum
+            vol_d = daily_ret.std().values + 1e-12
+            mom_1m = (1.0 + daily_ret.tail(21)).prod().values - 1.0
+            mom_1w = (1.0 + daily_ret.tail(5)).prod().values - 1.0
+
+            # Candidate portfolios
+            inv_vol = (1.0 / vol_d)
+            inv_vol = np.clip(inv_vol, 0, np.percentile(inv_vol, 95))
+            inv_vol = inv_vol / inv_vol.sum()
+
+            mom_blend = momentum_weight * np.maximum(mom_1m, 0) + (1.0 - momentum_weight) * np.maximum(mom_1w, 0)
+            if mom_blend.sum() <= 1e-12:
+                mom_blend = np.ones_like(mom_blend)
+            mom_blend = mom_blend / mom_blend.sum()
+
+            balanced_raw = 0.5 * inv_vol + 0.5 * mom_blend
+            balanced_raw = balanced_raw / balanced_raw.sum()
+
+            # Sector caps for diversification
+            mapper_local = load_or_build_mapper() or {}
+            sectors_of_assets = []
+            for t in TICKERS:
+                val = mapper_local.get(t, {})
+                sec = val.get('sector') if isinstance(val, dict) else (val or 'Other')
+                sectors_of_assets.append(sec)
+
+            def apply_sector_caps(w, cap=0.30):
+                w = w.copy()
+                # Iteratively project onto sector-cap constraints
+                for _ in range(5):
+                    sector_sum = {}
+                    for i, s in enumerate(sectors_of_assets):
+                        sector_sum[s] = sector_sum.get(s, 0.0) + w[i]
+                    adjusted = False
+                    for s, total in sector_sum.items():
+                        if total > cap:
+                            # Scale down weights in this sector
+                            factor = cap / total
+                            for i, s_i in enumerate(sectors_of_assets):
+                                if s_i == s:
+                                    w[i] *= factor
+                            adjusted = True
+                    if not adjusted:
+                        break
+                    # Renormalize after adjustments
+                    w_sum = w.sum()
+                    if w_sum > 1e-12:
+                        w = w / w_sum
+                return w
+
+            balanced_capped = apply_sector_caps(balanced_raw, cap=sector_cap)
+
+            # Risk ordering vs. inference: aim for moderate annual volatility
+            def annual_vol(w, cov):
+                return float(np.sqrt(w @ cov @ w) * np.sqrt(12.0))
+
+            w_model = future_weights / future_weights.sum()
+            vol_model = annual_vol(w_model, cov_m)
+            vol_bal = annual_vol(balanced_capped, cov_m)
+
+            # Blend to target volatility
+            if target_vol_annual is None:
+                target_vol = 0.5 * (vol_model + vol_bal)
+            else:
+                target_vol = float(target_vol_annual)
+            # Bisection-style blend on alpha in [0,1]
+            alpha_low, alpha_high = 0.0, 1.0
+            final_weights = None
+            for _ in range(20):
+                alpha = 0.5 * (alpha_low + alpha_high)
+                w_mix = alpha * w_model + (1 - alpha) * balanced_capped
+                w_mix = w_mix / max(1e-12, w_mix.sum())
+                v = annual_vol(w_mix, cov_m)
+                if v > target_vol:
+                    alpha_high = alpha
+                else:
+                    alpha_low = alpha
+                final_weights = w_mix
+            if final_weights is None:
+                final_weights = balanced_capped
+
+            # Compute evaluation metrics for the final balanced portfolio
+            port_m = (monthly_ret.values @ final_weights)
+            mean_m = float(np.mean(port_m))
+            vol_m = float(np.std(port_m) + 1e-12)
+            vol_annual = float(vol_m * np.sqrt(12.0))
+            sharpe = float(mean_m / vol_m) if vol_m > 0 else 0.0
+            # Sortino (downside std)
+            downside = np.std(np.minimum(port_m, 0.0)) + 1e-12
+            sortino = float(mean_m / downside) if downside > 0 else 0.0
+            # Max Drawdown over monthly equity curve
+            eq = np.cumprod(1.0 + port_m)
+            peak = np.maximum.accumulate(eq)
+            mdd = float(np.max((peak - eq) / peak)) if len(eq) else 0.0
+            # CVaR 95%
+            q = np.quantile(port_m, 0.05) if len(port_m) else 0.0
+            cvar95 = float(np.mean(port_m[port_m <= q])) if len(port_m) else 0.0
+            # Short-term daily
+            st_1w = float((1.0 + (daily_ret.values @ final_weights)[-5:]).prod() - 1.0) if len(daily_ret) >= 5 else 0.0
+            st_1m = float((1.0 + (daily_ret.values @ final_weights)[-21:]).prod() - 1.0) if len(daily_ret) >= 21 else 0.0
+
+            # Rolling 12m backtest metrics (guard against NaNs)
+            try:
+                # Use last 120 months if available
+                roll_window = 12
+                port_m_series = pd.Series(port_m)
+                # Rolling Sharpe (mean/std in window)
+                roll_mean = port_m_series.rolling(roll_window, min_periods=roll_window).mean()
+                roll_std = port_m_series.rolling(roll_window, min_periods=roll_window).std() + 1e-12
+                rs_val = (roll_mean / roll_std).iloc[-1] if len(port_m_series) >= roll_window else 0.0
+                rolling_sharpe_12m = float(rs_val) if np.isfinite(rs_val) else 0.0
+                # Rolling max drawdown over last 12m
+                window_slice = port_m_series.iloc[-roll_window:] if len(port_m_series) >= roll_window else port_m_series
+                eq_w = np.cumprod(1.0 + window_slice.values)
+                peak_w = np.maximum.accumulate(eq_w)
+                mdd_val = np.max((peak_w - eq_w) / peak_w) if len(eq_w) else 0.0
+                rolling_mdd_12m = float(mdd_val) if np.isfinite(mdd_val) else 0.0
+            except Exception:
+                rolling_sharpe_12m = 0.0
+                rolling_mdd_12m = 0.0
+
+            # Turnover proxy vs model weights (one-step difference)
+            avg_turnover = float(np.sum(np.abs(final_weights - (future_weights / future_weights.sum()))))
+        except Exception as e:
+            # Fallback to model weights if metrics fail
+            print(f"[train_by_sectors] Balanced post-processing failed: {e}")
+            final_weights = future_weights / future_weights.sum()
+            mean_m = vol_m = vol_annual = sharpe = sortino = mdd = cvar95 = st_1w = st_1m = 0.0
+            rolling_sharpe_12m = rolling_mdd_12m = avg_turnover = 0.0
+
         # Top-K allocations
         # Determine indices for top allocations
         if isinstance(top_k, int) and top_k > 0:
-            idxs = np.argsort(future_weights)[-top_k:][::-1]
+            idxs = np.argsort(final_weights)[-top_k:][::-1]
         else:
             # 'all' or non-positive -> return all assets sorted
-            idxs = np.argsort(future_weights)[::-1]
+            idxs = np.argsort(final_weights)[::-1]
         portfolio = []
         for i in idxs:
             tkr = TICKERS[i]
@@ -738,7 +919,7 @@ def train_by_sectors(request):
             abbr = val.get('abbr') if isinstance(val, dict) else ''
             portfolio.append({
                 'ticker': tkr,
-                'allocation': float(future_weights[i] * 100.0),
+                'allocation': float(final_weights[i] * 100.0),
                 'sector': sector,
                 'abbr': abbr
             })
@@ -771,7 +952,30 @@ def train_by_sectors(request):
             'sectors': out_sectors,
             'tickers_used': TICKERS,
             'portfolio': portfolio,
-            'assets_used': comm_assets_used if 'comm_assets_used' in locals() else []
+            'assets_used': comm_assets_used if 'comm_assets_used' in locals() else [],
+            'params_used': {
+                'sector_cap': sector_cap,
+                'momentum_weight': momentum_weight,
+                'target_vol_annual': target_vol_annual,
+                'recent_days': recent_days,
+                'window': window,
+                'epochs': epochs,
+                'top_k': top_k if isinstance(top_k, int) else TOP_K_DEFAULT
+            },
+            'metrics': {
+                'mean_monthly': mean_m,
+                'vol_monthly': vol_m,
+                'vol_annual': vol_annual,
+                'sharpe': sharpe,
+                'sortino': sortino,
+                'max_drawdown': mdd,
+                'cvar_95': cvar95,
+                'short_term_1w': st_1w,
+                'short_term_1m': st_1m,
+                'rolling_sharpe_12m': rolling_sharpe_12m,
+                'rolling_mdd_12m': rolling_mdd_12m,
+                'avg_turnover': avg_turnover
+            }
         })
 
     except Exception as e:
