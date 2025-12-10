@@ -1,3 +1,50 @@
+## CNN Portfolio Allocator – Architecture Diagram
+
+```mermaid
+graph TD
+        A[Input Tensor<br/>channels x window x assets] --> B1[Price Channels<br/>Low_norm, High_norm, Close_norm]
+        A --> B2[Sector One-Hot<br/>GICS/Commodities]
+
+        subgraph Feature_Stack
+            B1 --> C[Concatenate<br/>(3 + N_sector) channels]
+            B2 --> C
+        end
+
+        C --> D1[Conv2d (3x1) + Padding (1,0)]
+        D1 --> D2[BatchNorm2d + ReLU]
+        D2 --> E1[Conv2d (3x1) channels x2]
+        E1 --> E2[BatchNorm2d + ReLU]
+
+        E2 --> F[AdaptiveAvgPool2d<br/>(1 x num_assets)]
+        F --> G[Flatten]
+
+        G --> H1[FC1 -> 96] --> H2[ReLU + Dropout(0.4)]
+        H2 --> I1[FC2 -> 48] --> I2[ReLU + Dropout(0.3)]
+        I2 --> J[FC3 -> num_assets]
+        J --> K[Softmax<br/>Allocation Weights]
+
+        subgraph Training
+            K --> L[Loss: beta_risk * std(portfolio) - alpha_return * mean(portfolio)]
+            L --> M[Adam Optimizer + CosineAnnealing]
+        end
+
+        subgraph Post_Processing
+            K --> N1[Inverse-Vol Portfolio]
+            K --> N2[Momentum Portfolio<br/>(1W/1M)]
+            N1 --> O[Blend & Normalize]
+            N2 --> O
+            O --> P[Apply Sector Caps]
+            P --> Q[Target Annual Vol (bisection)]
+            Q --> R[Final Weights + Metrics]
+        end
+```
+
+Notes:
+- Input channels are normalized per asset by the last close in the window.
+- Sector one-hot adds categorical context; commodities are tagged as a sector.
+- The loss explicitly trades off risk (std) vs return (mean) via α/β.
+- Post-processing blends risk/return heuristics, applies diversification caps, and aligns volatility.
+
 # AI-Powered Portfolio Optimization
 
 ![Python](https://img.shields.io/badge/Python-3.10%2B-blue) ![Django](https://img.shields.io/badge/Django-5.0-green) ![PyTorch](https://img.shields.io/badge/PyTorch-2.0-orange)
