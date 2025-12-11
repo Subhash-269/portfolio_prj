@@ -20,8 +20,8 @@ from drf_yasg import openapi
 
 # ---------- CONFIG & CONSTANTS ----------
 # Define these globally or inside the view if you want them dynamic
-WINDOW = 1  # Lookback window (days) for time-series slices
-BATCH_SIZE = 8  # Mini-batch size for training
+WINDOW = 50  # Lookback window (days) for time-series slices
+BATCH_SIZE = 16  # Mini-batch size for training
 EPOCHS = 100  # Max training epochs before early stopping
 LR = 1e-3  # Learning rate for Adam optimizer
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")  # Prefer GPU if available
@@ -125,27 +125,24 @@ class AllocNetWithSectors(nn.Module):
 
 class PortfolioLoss:
     @staticmethod
-    def combined_loss(weights, returns, prev_weights=None, commission=0.0025, alpha_return=2.0, beta_risk=0.5):
+    def combined_loss(weights, returns, prev_weights=None, commission=0.0025, alpha_return=2.0, beta_risk=0.5, use_turnover=False, use_diversity=False):
         portfolio_returns = torch.sum(weights * returns, dim=1)
         mean_return = torch.mean(portfolio_returns)
         std_return = torch.std(portfolio_returns) + 1e-6
         sharpe = mean_return / std_return if std_return.item() > 1e-12 else torch.tensor(0.0, device=returns.device)
-        if prev_weights is not None:
-            turnover = torch.sum(torch.abs(weights - prev_weights), dim=1).mean()
-            transaction_cost = 0.001 * turnover
-        else:
-            transaction_cost = 0.0
+        turnover = torch.sum(torch.abs(weights - (prev_weights if prev_weights is not None else weights)), dim=1).mean()
+        transaction_cost = 0.001 * turnover if use_turnover else 0.0
         concentration = torch.sum(weights ** 2, dim=1).mean()
         concentration_penalty = 0.1 * concentration
         entropy = -torch.sum(weights * torch.log(weights + 1e-8), dim=1).mean()
-        diversity_bonus = 0.01 * entropy
+        diversity_bonus = (0.01 * entropy) if use_diversity else 0.0
         # Explicit risk-return tradeoff: minimize risk (std) and maximize return (mean)
         risk_term = std_return
         return_term = mean_return
         loss_core = beta_risk * risk_term - alpha_return * return_term
         # Preserve prior regularization terms
-        # loss = loss_core + transaction_cost + concentration_penalty - diversity_bonus
-        loss = loss_core #+ transaction_cost
+        # Optional: add turnover cost and diversity bonus
+        loss = loss_core + transaction_cost - diversity_bonus
         return loss, sharpe.item(), return_term.item(), risk_term.item()
 
 # ---------- HELPER: Data Processing ----------
@@ -352,7 +349,7 @@ def load_or_build_mapper():
         # Expect columns: Symbol, GICS Sector, optionally Security
         cols = {c.lower(): c for c in df_map.columns}
         sym_col = cols.get('symbol') or cols.get('ticker')
-        sec_col = cols.get('gics sector') or cols.get('sector')
+        sec_col = cols.get('gics sector') or cols.get('sector') 
         abbr_col = cols.get('security')
         if not sym_col or not sec_col:
             return {}
@@ -570,6 +567,18 @@ def train_by_sectors(request):
             beta_risk = float(beta_risk_req)
         except Exception:
             beta_risk = TUNING_DEFAULTS['beta_risk']
+        # New flags: enable/disable regularization terms and vol targeting
+        def _as_bool(v, default=False):
+            if isinstance(v, bool):
+                return v
+            if isinstance(v, str):
+                s = v.strip().lower()
+                if s in ('true','1','yes','y','on'): return True
+                if s in ('false','0','no','n','off'): return False
+            return default
+        use_turnover_flag = _as_bool(request.data.get('use_turnover'), False)
+        use_diversity_flag = _as_bool(request.data.get('use_diversity'), False)
+        disable_vol_targeting = _as_bool(request.data.get('disable_vol_targeting'), False)
 
         base_dir = getattr(settings, 'BASE_DIR', os.getcwd())
         stock_csv = os.path.join(base_dir, 'Training', 'diversified_market_data.csv')
@@ -727,6 +736,11 @@ def train_by_sectors(request):
         best_loss = float('inf')
         patience_counter = 0
         EARLY_STOP_PATIENCE = 15
+        # Track Sharpe per epoch for both train and validation
+        sharpe_history_train = []
+        sharpe_history_val = []
+        loss_history_train = []
+        loss_history_val = []
         for ep in range(epochs):
             model.train()
             epoch_loss = 0.0
@@ -738,7 +752,8 @@ def train_by_sectors(request):
                 opt.zero_grad()
                 w = model(xb)
                 loss, batch_sharpe, batch_return, batch_risk = PortfolioLoss.combined_loss(
-                    w, yb, prev_weights=w.detach(), alpha_return=alpha_return, beta_risk=beta_risk
+                    w, yb, prev_weights=w.detach(), alpha_return=alpha_return, beta_risk=beta_risk,
+                    use_turnover=use_turnover_flag, use_diversity=use_diversity_flag
                 )
                 if torch.isnan(loss) or torch.isinf(loss):
                     continue
@@ -752,6 +767,8 @@ def train_by_sectors(request):
                     torch.cuda.empty_cache()
             avg_train_loss = epoch_loss / max(1, count)
             avg_train_sharpe = epoch_sharpe / max(1, count)
+            loss_history_train.append(float(avg_train_loss))
+            sharpe_history_train.append(float(avg_train_sharpe))
 
             # Validation
             model.eval()
@@ -760,9 +777,13 @@ def train_by_sectors(request):
                 Y_val_t = torch.from_numpy(Y_val).float().to(DEVICE)
                 w_val = model(X_val_t)
                 val_loss, val_sharpe, val_return, val_risk = PortfolioLoss.combined_loss(
-                    w_val, Y_val_t, prev_weights=w_val.detach(), alpha_return=alpha_return, beta_risk=beta_risk
+                    w_val, Y_val_t, prev_weights=w_val.detach(), alpha_return=alpha_return, beta_risk=beta_risk,
+                    use_turnover=use_turnover_flag, use_diversity=use_diversity_flag
                 )
                 avg_val_loss = val_loss.item()
+                # Record validation metrics for this epoch
+                loss_history_val.append(float(avg_val_loss))
+                sharpe_history_val.append(float(val_sharpe))
             scheduler.step()
 
             improved = "✓" if avg_val_loss < best_loss else ""
@@ -776,6 +797,84 @@ def train_by_sectors(request):
             if patience_counter >= EARLY_STOP_PATIENCE:
                 print(f"\n⚠️  Early stopping at epoch {ep+1} (no improvement for {EARLY_STOP_PATIENCE} epochs)")
                 break
+
+        # Save Epochs vs Sharpe/Loss plots to outputs folder and CSV
+        try:
+            import matplotlib
+            matplotlib.use('Agg')  # Non-interactive backend for server
+            import matplotlib.pyplot as plt
+            base_dir = getattr(settings, 'BASE_DIR', os.getcwd())
+            outputs_dir = os.path.join(base_dir, 'outputs')
+            os.makedirs(outputs_dir, exist_ok=True)
+            # Combined Sharpe plot (train vs val)
+            fig_path = os.path.join(outputs_dir, 'epochs_vs_sharpe.png')
+            plt.figure(figsize=(9, 5))
+            epochs_axis = range(1, len(sharpe_history_val) + 1)
+            plt.plot(epochs_axis, sharpe_history_train[:len(epochs_axis)], label='Train Sharpe', alpha=0.6)
+            plt.plot(epochs_axis, sharpe_history_val, label='Val Sharpe', marker='o', linewidth=2)
+            plt.title('Training Epochs vs Sharpe (Train vs Validation)')
+            plt.xlabel('Epoch')
+            plt.ylabel('Sharpe Ratio')
+            plt.legend()
+            plt.grid(True, linestyle='--', alpha=0.5)
+            plt.tight_layout()
+            plt.savefig(fig_path, dpi=150)
+            plt.close()
+
+            # Smoothed Sharpe (EMA on validation)
+            try:
+                import numpy as _np
+                ema_alpha = 0.2
+                val_arr = _np.array(sharpe_history_val, dtype=float)
+                ema = _np.zeros_like(val_arr)
+                if len(val_arr) > 0:
+                    ema[0] = val_arr[0]
+                    for i in range(1, len(val_arr)):
+                        ema[i] = ema_alpha * val_arr[i] + (1 - ema_alpha) * ema[i-1]
+                fig_path_smoothed = os.path.join(outputs_dir, 'epochs_vs_sharpe_smoothed.png')
+                plt.figure(figsize=(9, 5))
+                plt.plot(epochs_axis, val_arr, label='Val Sharpe', color='#FF7F0E', alpha=0.35)
+                plt.plot(epochs_axis, ema, label='Val Sharpe (EMA 0.2)', color='#FF7F0E', linewidth=2)
+                plt.title('Validation Sharpe (EMA Smoothed)')
+                plt.xlabel('Epoch')
+                plt.ylabel('Sharpe Ratio')
+                plt.legend()
+                plt.grid(True, linestyle='--', alpha=0.5)
+                plt.tight_layout()
+                plt.savefig(fig_path_smoothed, dpi=150)
+                plt.close()
+            except Exception:
+                fig_path_smoothed = None
+
+            # Loss plot (train vs val)
+            loss_fig_path = os.path.join(outputs_dir, 'epochs_vs_loss.png')
+            plt.figure(figsize=(9, 5))
+            plt.plot(epochs_axis, loss_history_train[:len(epochs_axis)], label='Train Loss', alpha=0.6)
+            plt.plot(epochs_axis, loss_history_val, label='Val Loss', marker='o', linewidth=2)
+            plt.title('Training Epochs vs Loss (Train vs Validation)')
+            plt.xlabel('Epoch')
+            plt.ylabel('Loss')
+            plt.legend()
+            plt.grid(True, linestyle='--', alpha=0.5)
+            plt.tight_layout()
+            plt.savefig(loss_fig_path, dpi=150)
+            plt.close()
+
+            # Save raw history to CSV for deeper analysis
+            hist_csv_path = os.path.join(outputs_dir, 'training_history.csv')
+            hist_df = pd.DataFrame({
+                'epoch': list(epochs_axis),
+                'train_sharpe': sharpe_history_train[:len(epochs_axis)],
+                'val_sharpe': sharpe_history_val,
+                'train_loss': loss_history_train[:len(epochs_axis)],
+                'val_loss': loss_history_val,
+            })
+            hist_df.to_csv(hist_csv_path, index=False)
+        except Exception as e:
+            fig_path = None
+            loss_fig_path = None
+            hist_csv_path = None
+            print(f"[train_by_sectors] Failed to save Sharpe plot: {e}")
 
         # Inference for next-day allocation
         model.eval()
@@ -860,26 +959,29 @@ def train_by_sectors(request):
             vol_model = annual_vol(w_model, cov_m)
             vol_bal = annual_vol(balanced_capped, cov_m)
 
-            # Blend to target volatility
-            if target_vol_annual is None:
-                target_vol = 0.5 * (vol_model + vol_bal)
+            # Blend to target volatility (optional disable)
+            if disable_vol_targeting:
+                final_weights = w_model
             else:
-                target_vol = float(target_vol_annual)
-            # Bisection-style blend on alpha in [0,1]
-            alpha_low, alpha_high = 0.0, 1.0
-            final_weights = None
-            for _ in range(20):
-                alpha = 0.5 * (alpha_low + alpha_high)
-                w_mix = alpha * w_model + (1 - alpha) * balanced_capped
-                w_mix = w_mix / max(1e-12, w_mix.sum())
-                v = annual_vol(w_mix, cov_m)
-                if v > target_vol:
-                    alpha_high = alpha
+                if target_vol_annual is None:
+                    target_vol = 0.5 * (vol_model + vol_bal)
                 else:
-                    alpha_low = alpha
-                final_weights = w_mix
-            if final_weights is None:
-                final_weights = balanced_capped
+                    target_vol = float(target_vol_annual)
+                # Bisection-style blend on alpha in [0,1]
+                alpha_low, alpha_high = 0.0, 1.0
+                final_weights = None
+                for _ in range(20):
+                    alpha = 0.5 * (alpha_low + alpha_high)
+                    w_mix = alpha * w_model + (1 - alpha) * balanced_capped
+                    w_mix = w_mix / max(1e-12, w_mix.sum())
+                    v = annual_vol(w_mix, cov_m)
+                    if v > target_vol:
+                        alpha_high = alpha
+                    else:
+                        alpha_low = alpha
+                    final_weights = w_mix
+                if final_weights is None:
+                    final_weights = balanced_capped
 
             # Compute evaluation metrics for the final balanced portfolio
             port_m = (monthly_ret.values @ final_weights)
@@ -979,6 +1081,12 @@ def train_by_sectors(request):
             'tickers_used': TICKERS,
             'portfolio': portfolio,
             'assets_used': comm_assets_used if 'comm_assets_used' in locals() else [],
+            'outputs': {
+                'epochs_vs_sharpe_path': ('outputs/epochs_vs_sharpe.png' if 'fig_path' in locals() and fig_path else None),
+                'epochs_vs_loss_path': ('outputs/epochs_vs_loss.png' if 'loss_fig_path' in locals() and loss_fig_path else None),
+                'training_history_csv': ('outputs/training_history.csv' if 'hist_csv_path' in locals() and hist_csv_path else None),
+                'epochs_vs_sharpe_smoothed_path': ('outputs/epochs_vs_sharpe_smoothed.png' if 'fig_path_smoothed' in locals() and fig_path_smoothed else None)
+            },
             'params_used': {
                 'sector_cap': sector_cap,
                 'momentum_weight': momentum_weight,
@@ -988,7 +1096,10 @@ def train_by_sectors(request):
                 'beta_risk': beta_risk,
                 'window': window,
                 'epochs': epochs,
-                'top_k': top_k if isinstance(top_k, int) else TOP_K_DEFAULT
+                'top_k': top_k if isinstance(top_k, int) else TOP_K_DEFAULT,
+                'use_turnover': use_turnover_flag,
+                'use_diversity': use_diversity_flag,
+                'disable_vol_targeting': disable_vol_targeting
             },
             'metrics': {
                 'mean_monthly': mean_m,
