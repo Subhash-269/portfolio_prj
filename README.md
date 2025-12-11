@@ -1,3 +1,49 @@
+## Setup and Run Guide
+
+- **Install requirements:**
+    - In the project root, install Python deps:
+        - Windows PowerShell:
+      
+            ```powershell
+            pip install -r requirements.txt
+            ```
+
+- **Prepare data (Stocks & Commodities):**
+    - Generate composites and mappings:
+    
+        ```powershell
+        python Training\topcomp.py
+        ```
+    - Extract stock market data:
+    
+        ```powershell
+        python Training\extract_stocks_market.py
+        ```
+    - Extract commodities data:
+    
+        ```powershell
+        python Training\Commodities\extractcomm.py
+        ```
+
+- **Run backend (Django):**
+    - From the project root:
+    
+        ```powershell
+        python manage.py runserver
+        ```
+
+- **Run frontend (React):**
+    - In `front_end` folder:
+    
+        ```powershell
+        npm install
+        npm start
+        ```
+    - You can ignore npm warnings and vulnerability notices for this demo setup.
+
+- **Open the app:**
+    - Visit http://localhost:3000 and explore the dashboard.
+
 # AI-Powered Portfolio Optimization
 
 ![Python](https://img.shields.io/badge/Python-3.10%2B-blue) ![Django](https://img.shields.io/badge/Django-5.0-green) ![PyTorch](https://img.shields.io/badge/PyTorch-2.0-orange)
